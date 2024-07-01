@@ -12,7 +12,7 @@ commit:
 	read comment; \
 	git commit -m"$$comment"
 sync: commit
-	git push -u origin $(BRANCH)
+	git push -u triton_learn $(BRANCH)
 reset_hard:
 	git fetch && git reset --hard origin/$(BRANCH)
 
