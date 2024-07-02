@@ -1,3 +1,6 @@
 [submodule "triton"]
 	path = triton
 	url = git@github.com:triton-lang/triton.git
+[submodule "llvm-project"]
+	path = llvm-project
+	url = git@github.com:llvm/llvm-project.git
