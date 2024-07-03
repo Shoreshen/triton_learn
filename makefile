@@ -15,11 +15,20 @@ build_llvm:
 PHONY += checkout_hash config_llvm build_llvm
 # Triton Build ===========================================================================
 config_triton:
-	cd triton && cmake -B build -G Ninja -DTRITON_BUILD_PYTHON_MODULE=ON -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_PREFIX=../bin -DCMAKE_INSTALL_PREFIX="/usr/lib/python3.12/site-packages/pybind11/include" -DLLVM_LIBRARY_DIR="../llvm-project/build/lib" -DCUPTI_INCLUDE_DIR="/opt/cuda/extras/CUPTI/include;/opt/cuda/targets/x86_64-linux/include" -DROCTRACER_INCLUDE_DIR="/opt/rocm/include/" -DJSON_INCLUDE_DIR="/usr/include/" -DCMAKE_EXPORT_COMPILE_COMMANDS=1
+	cd triton && cmake -B build -G Ninja -DTRITON_BUILD_PYTHON_MODULE=ON -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_PREFIX=../bin -DPYBIND11_INCLUDE_DIR="/usr/lib/python3.12/site-packages/pybind11/include" -DLLVM_LIBRARY_DIR="../llvm-project/build/lib" -DTRITON_BUILD_PROTON=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=1
 build_triton:
-	cd triton/build && ninja
+	cd triton/build && LLVM_INCLUDE_DIRS=../llvm-project/build/include LLVM_LIBRARY_DIR=../llvm-project/build/lib LLVM_SYSPATH=../llvm-project/build CMAKE_BUILD_TYPE=Debug MAX_JOBS=8 pip install -e python
 
 PHONY += config_triton build_triton
+# python virtualenv ======================================================================
+.venv:
+	python -m venv .venv --prompt triton
+active_venv: .venv
+	source .venv/bin/activate
+deactive_venv:
+	- deactivate
+
+PHONY += active_venv deactive_venv
 # git ====================================================================================
 sub_pull:
 	git submodule foreach --recursive 'git pull'
