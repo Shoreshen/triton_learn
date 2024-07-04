@@ -4,6 +4,10 @@
 # $?  表示比目标还要新的依赖文件列表
 BRANCH = $(shell git symbolic-ref --short HEAD)
 LLVM_HASH = $(shell cat ./triton/cmake/llvm-hash.txt)
+TEXT =
+# tools ==================================================================================
+search_text:
+	grep -rn --exclude="*.o" --exclude="*.so" "$(TEXT)" .
 # LLVM Build =============================================================================
 checkout_hash:
 	cd llvm-project && git checkout $(LLVM_HASH)
