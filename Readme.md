@@ -51,7 +51,7 @@ Build LLVM withDebug Symbols：
    pip install ninja cmake wheel
    pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/121
    ```
-	1. Note have to install pre version of `pytorch` release version only support `triton-2.3.0`
+    1. Note have to install pre version of `pytorch` release version only support `triton-2.3.0`
 3. Deleted installed `triton`：
    ```bash
    pip uninstall triton pytorch-triton
@@ -61,9 +61,9 @@ Build LLVM withDebug Symbols：
    cd <path/to/triton>
    LLVM_INCLUDE_DIRS=<path/to/LLVM>/build/include LLVM_LIBRARY_DIR=<path/to/LLVM>/build/lib LLVM_SYSPATH=<path/to/LLVM>/build DEBUG=1 MAX_JOBS=8 pip install -e python
    ```
-	1. `DEBUG=1`: Compile in debug mode
-	2. `LLVM_INCLUDE_DIRS`, `LLVM_LIBRARY_DIR` and `LLVM_SYSPATH` using [Compiled LLVM](#llvm) to build `triton`
-	3. `MAX_JOBS`: Number of jobs to compile `triton`, prevent memory overflow
+    1. `DEBUG=1`: Compile in debug mode
+    2. `LLVM_INCLUDE_DIRS`, `LLVM_LIBRARY_DIR` and `LLVM_SYSPATH` using [Compiled LLVM](#llvm) to build `triton`
+    3. `MAX_JOBS`: Number of jobs to compile `triton`, prevent memory overflow
 
 ## Debug with VSCode
 
@@ -73,36 +73,36 @@ Build LLVM withDebug Symbols：
 
 ```json
 {
-"version": "0.2.0",
-	"configurations": [
-		{
-			"name": "Python: triton_compile_test.py",
-			"type": "debugpy",
-			"request": "launch",
-			"program": "${workspaceFolder}/tests/triton_compile_test.py",
-			"console": "integratedTerminal",
-			"env": {
-				// "MLIR_ENABLE_DUMP": "1",
-				// "LLVM_IR_ENABLE_DUMP": "1",
-				// "TRITON_ENABLE_LLVM_DEBUG": "1"
-			}
-		},
-		{
-			"name": "(gdb) Attach",
-			"type": "cppdbg",
-			"request": "attach",
-			"program": "${workspaceFolder}/.venv/bin/python",
-			"processId": "${command:pickProcess}",
-			"MIMode": "gdb",
-			"setupCommands": [
-				{
-					"description": "Enable pretty-printing for gdb",
-					"text": "-enable-pretty-printing",
-					"ignoreFailures": true
-				}
-			]
-		}
-	]
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: triton_compile_test.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/tests/triton_compile_test.py",
+            "console": "integratedTerminal",
+            "env": {
+                // "MLIR_ENABLE_DUMP": "1",
+                // "LLVM_IR_ENABLE_DUMP": "1",
+                // "TRITON_ENABLE_LLVM_DEBUG": "1"
+            }
+        },
+        {
+            "name": "(gdb) Attach",
+            "type": "cppdbg",
+            "request": "attach",
+            "program": "${workspaceFolder}/.venv/bin/python",
+            "processId": "${command:pickProcess}",
+            "MIMode": "gdb",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ]
+        }
+    ]
 }
 ```
 
@@ -113,27 +113,27 @@ import torch
 import torch.nn as nn
 
 class SiluModel(nn.Module):
-	def __init__(self):
-		super(SiluModel, self).__init__()
-		self.act_fn = nn.functional.sigmoid
-	def forward(self, x, up):
-		x = self.act_fn(x) * x * up
-		return x
+    def __init__(self):
+        super(SiluModel, self).__init__()
+        self.act_fn = nn.functional.sigmoid
+    def forward(self, x, up):
+        x = self.act_fn(x) * x * up
+        return x
 
 def get_input(rank_id):
-	input_ids = torch.rand((32, 1, 896), dtype=torch.float32)
-	up = torch.rand((32, 1, 896), dtype=torch.float32)
-	input_ids = input_ids.to("cuda:" + str(rank_id))
-	up = up.to("cuda:" + str(rank_id))
-	return input_ids, up
+    input_ids = torch.rand((32, 1, 896), dtype=torch.float32)
+    up = torch.rand((32, 1, 896), dtype=torch.float32)
+    input_ids = input_ids.to("cuda:" + str(rank_id))
+    up = up.to("cuda:" + str(rank_id))
+    return input_ids, up
 
 if __name__ == '__main__':
-	model = SiluModel().to("cuda")
-	model.eval()
-	opt_model = torch.compile(model)
-	input_ids, up = get_input(0)
-	output = opt_model(input_ids, up)
-	print("debug output:", output)
+    model = SiluModel().to("cuda")
+    model.eval()
+    opt_model = torch.compile(model)
+    input_ids, up = get_input(0)
+    output = opt_model(input_ids, up)
+    print("debug output:", output)
 ```
 
 ### Debug steps
@@ -143,18 +143,18 @@ if __name__ == '__main__':
    ```py
    @staticmethod
    def make_ttir(mod, metadata, opt):
-		pm = ir.pass_manager(mod.context)
-		pm.enable_debug()
-		passes.common.add_inliner(pm)
-		passes.ttir.add_rewrite_tensor_pointer(pm)
-		passes.ttir.add_combine(pm)
-		passes.common.add_canonicalizer(pm)
-		passes.ttir.add_reorder_broadcast(pm)
-		passes.common.add_cse(pm)
-		passes.common.add_licm(pm)
-		passes.common.add_symbol_dce(pm)
-		pm.run(mod)    #<------ Breakpoint here
-		return mod
+        pm = ir.pass_manager(mod.context)
+        pm.enable_debug()
+        passes.common.add_inliner(pm)
+        passes.ttir.add_rewrite_tensor_pointer(pm)
+        passes.ttir.add_combine(pm)
+        passes.common.add_canonicalizer(pm)
+        passes.ttir.add_reorder_broadcast(pm)
+        passes.common.add_cse(pm)
+        passes.common.add_licm(pm)
+        passes.common.add_symbol_dce(pm)
+        pm.run(mod)    #<------ Breakpoint here
+        return mod
    ```
 3. Launch `Python: triton_compile_test.py` and break at the above breakpoint
 4. Breakpoint will stop at one of the subprocesses, need to attach to that process
