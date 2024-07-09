@@ -85,7 +85,8 @@ Build LLVM withDebug Symbols：
             "env": {
                 // "MLIR_ENABLE_DUMP": "1",
                 // "LLVM_IR_ENABLE_DUMP": "1",
-                // "TRITON_ENABLE_LLVM_DEBUG": "1"
+                // "TRITON_ENABLE_LLVM_DEBUG": "1",
+                "TRITON_CACHE_DIR" : "${workspaceFolder}/.cache" //triton will cache compiled result here and reuse it 
             }
         },
         {
@@ -317,7 +318,7 @@ In [`main.cc`](./triton-project/python/src/main.cc) file, it uses `TRITON_BACKEN
     FOR_EACH_P(INIT_BACKEND, TRITON_BACKENDS_TUPLE)
     ```
 
-## Summary
+### Summary
 
 With the above illustration, the necessary steps to add a new triton backend are:
 
@@ -348,6 +349,9 @@ With the above illustration, the necessary steps to add a new triton backend are
      add_triton_plugin(TritonNVIDIA ${CMAKE_CURRENT_SOURCE_DIR}/triton_nvidia.cc LINK_LIBS TritonNVIDIAGPUToLLVM NVGPUToLLVM)
    endif()
    ```
+
+## Compiling process
+
 
 
 # Appendix
