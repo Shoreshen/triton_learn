@@ -12,7 +12,7 @@ search_text:
 checkout_hash:
 	cd llvm-project && git checkout $(LLVM_HASH)
 config_llvm:
-	cd llvm-project && cmake -G Ninja -S llvm -B build -DCMAKE_INSTALL_PREFIX=../bin -DCMAKE_BUILD_TYPE=Debug -DLLVM_ENABLE_ASSERTIONS=ON -DLLVM_ENABLE_PROJECTS="mlir;llvm" -DLLVM_TARGETS_TO_BUILD="host;NVPTX;AMDGPU" -DLLVM_PARALLEL_COMPILE_JOBS=32 -DLLVM_PARALLEL_LINK_JOBS=4
+	cd llvm-project && cmake -G Ninja -S llvm -B build -DCMAKE_INSTALL_PREFIX=../bin -DCMAKE_BUILD_TYPE=Debug -DLLVM_ENABLE_ASSERTIONS=ON -DLLVM_ENABLE_PROJECTS="mlir;llvm" -DLLVM_TARGETS_TO_BUILD="host;NVPTX;AMDGPU;RISCV" -DLLVM_PARALLEL_COMPILE_JOBS=32 -DLLVM_PARALLEL_LINK_JOBS=4
 build_llvm:
 	cd llvm-project/build && ninja
 
@@ -32,6 +32,7 @@ deactive_venv:
 clear_cache:
 	find . -type d -name "__pycache__" -exec rm -r {} +
 	rm -rf /tmp/torchinductor_shore
+	rm -rf ./.cache/*
 
 PHONY += active_venv deactive_venv clear_cache
 # git ====================================================================================

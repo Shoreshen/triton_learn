@@ -5,6 +5,19 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "Python: 01-vector-add",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/triton-project/python/tutorials/01-vector-add.py",
+            "console": "integratedTerminal",
+            "env": {
+                // "MLIR_ENABLE_DUMP": "1",
+                // "LLVM_IR_ENABLE_DUMP": "1",
+                // "TRITON_ENABLE_LLVM_DEBUG": "1",
+                "TRITON_CACHE_DIR" : "${workspaceFolder}/.cache"
+            }
+        },
+        {
             "name": "Python: triton_compile_test.py",
             "type": "debugpy",
             "request": "launch",
@@ -13,10 +26,11 @@
             "env": {
                 // "MLIR_ENABLE_DUMP": "1",
                 // "LLVM_IR_ENABLE_DUMP": "1",
-                // "TRITON_ENABLE_LLVM_DEBUG": "1"
+                // "TRITON_ENABLE_LLVM_DEBUG": "1",
+                "TRITON_CACHE_DIR" : "${workspaceFolder}/.cache"
             }
         },
-        { 
+        {
             "name": "(gdb) Attach",
             "type": "cppdbg",
             "request": "attach",

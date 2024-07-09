@@ -1,6 +1,8 @@
 {
     "files.associations": {
         "cuda.h": "c",
-        "*.inc": "cpp"
+        "*.inc": "cpp",
+        "compare": "cpp",
+        "cstdint": "cpp"
     }
 }
