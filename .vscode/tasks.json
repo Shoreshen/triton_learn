@@ -1,0 +1,12 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+        {
+            "label": "Clear Cache",
+            "type": "shell",
+            "command": "make clear_cache",
+            "problemMatcher": [],
+            "group": "build"
+        }
+    ]
+}

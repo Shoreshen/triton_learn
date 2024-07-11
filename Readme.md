@@ -220,6 +220,27 @@ From the above, we know that:
 4. and `driver.py` must have exactly one subclass of `DriverBase`.
 5. The search path is `triton/backends/`.
 
+<a id = "get_current_target"></a>
+
+Furthermore, definition of `BaseBackend` follows:
+
+```py
+class DriverBase(metaclass=ABCMeta):
+
+    @abstractclassmethod
+    def is_active(self):
+        pass
+
+    @abstractmethod
+    def get_current_target(self):
+        pass
+
+    def __init__(self) -> None:
+        pass
+```
+
+Which indicate that `is_active`, `get_current_target`, `__init__` should be realized in `driver.py`.
+
 ### Compilation of New Backend
 
 #### [setup.py](./triton-project/python/setup.py)
@@ -325,7 +346,7 @@ With the above illustration, the necessary steps to add a new triton backend are
 1. Create a new directory under `triton-project/third_party` assume the name is `new_backend`
 2. Under `triton-project/third_party/new_backend` add:
    1. `compiler.py` import `BaseBackend` from `triton.backends.compiler`, create exactly one subclass of `BaseBackend`
-   2. `driver.py` import `GPUDriver` from `triton.backends.driver`, create exactly one subclass of `DriverBase` (since `GPUDriver` is the subclass of `DriverBase`)
+   2. `driver.py` import `GPUDriver` from `triton.backends.driver`, create exactly one subclass of `DriverBase` (since `GPUDriver` is the subclass of `DriverBase`) and realize
 3. Create a `cpp/cc` file under `triton-project/third_party/new_backend`, include at least one function with the following signature:
    ```cpp
    #include <pybind11/pybind11.h>
@@ -350,7 +371,137 @@ With the above illustration, the necessary steps to add a new triton backend are
    endif()
    ```
 
-## Compiling process
+## Compilation process
+
+### Step 1
+
+Start of compiling process by using `KernelInterface(Generic[T]):` class as `kernel_fun[grid](..., BLOCK_SIZE=1024)` it will jump to [jit.py](./triton-project/python/triton/runtime/jit.py) to `run` function:
+
+```py
+class JITFunction(KernelInterface[T]):
+    ...
+    def run(self, *args, grid, warmup, **kwargs):
+        # parse options
+        device = driver.active.get_current_device()
+        stream = driver.active.get_current_stream(device)
+        ...
+        if kernel is None:
+            # Kernel is not cached; we have to compile.
+            target = driver.active.get_current_target()
+            backend = self.make_backend(target)
+            options = backend.parse_options(kwargs)
+            ...
+            # compile the kernel
+            src = self.ASTSource(self, signature, constants, configs[0])
+            kernel = self.compile(
+                src,
+                target=target,
+                options=options.__dict__,
+            )
+            ...
+```
+
+Note that:
+
+1. `driver.active` calling [_create_driver()](./triton-project/python/triton/runtime/driver.py#L5) function to get the aviliable driver class (which is the only subclass of `DriverBase`)
+    ```py
+    def _create_driver():
+        actives = [x.driver for x in backends.values() if x.driver.is_active()]
+        if len(actives) != 1:
+            raise RuntimeError(f"{len(actives)} active drivers ({actives}). There should only be one.")
+        return actives[0]()
+    ```
+2. `get_current_target()` is defined in [previous section](#get_current_target)
+3. `make_backend(target)` calling the function [`make_backend(target)`](./triton-project/python/triton/compiler/compiler.py#L310):
+    ```py
+    def make_backend(target):
+        actives = [x.compiler for x in backends.values() if x.compiler.supports_target(target)]
+        if len(actives) != 1:
+            raise RuntimeError(
+                f"{len(actives)} compatible backends for target ({target.backend}) ({actives}). There should only be one.")
+        return actives[0](target)
+    ```
+
+### Step 2
+
+By calling [self.compile](./triton-project/python/triton/compiler/compiler.py#L226) from [last step](#step-1) function to start compilation of the kernel.
+
+This step will cache compiled code in `TRITON_CACHE_DIR` and reuse it if the same kernel is called again. To make sure debug works as normal, the cached code should be deleted before re-run.
+
+The main compilation process focuses on the following code:
+```py
+def compile(src, target=None, options=None):
+    ...
+    # run compilation pipeline  and populate metadata
+    ...
+    try:
+        module = src.make_ir(options, codegen_fns, context)
+    except Exception as e:
+        filter_traceback(e)
+        raise
+    ...
+```
+
+By calling function [`src.make_ir`](./triton-project/python/triton/runtime/jit.py#L1252) it creates AST (by calling [`JITFunction::parse()`](./triton-project/python/triton/runtime/jit.py#L774)) and first layer of ir object (by calling [`generator.visit(fn.parse())`](./triton-project/python/triton/runtime/jit.py#L1165)):
+
+```py
+def ast_to_ttir(fn, specialization, context, options, codegen_fns):
+    ...
+    generator.visit(fn.parse())
+
+    ret = generator.module
+    # module takes ownership of the context
+    ret.context = context
+    return ret
+```
+
+### Step 3
+
+Setting up each lowering stage in the compilation pipeline, the main compilation process focuses on the following code:
+
+```py
+def compile(src, target=None, options=None):
+    ...
+    # run compilation pipeline  and populate metadata
+    stages = dict()
+    backend.add_stages(stages, options)
+    first_stage = list(stages.keys()).index(src.ext)
+    # when the source is an IR file, don't apply the passes related to this stage. This makes it easier to write IR level tests.
+    if ir_source:
+        first_stage += 1
+    context = ir.context()
+    ir.load_dialects(context)
+    backend.load_dialects(context)
+    codegen_fns = backend.get_codegen_implementation()
+    try:
+        module = src.make_ir(options, codegen_fns, context)
+    except Exception as e:
+        filter_traceback(e)
+        raise
+    use_ttgir_loc = os.environ.get("USE_TTGIR_LOC", "0") == "1"
+    for ext, compile_ir in list(stages.items())[first_stage:]:
+        next_module = compile_ir(module, metadata)
+        ir_filename = f"{file_name}.{ext}"
+        metadata_group[ir_filename] = fn_cache_manager.put(next_module, ir_filename)
+        if fn_dump_manager is not None:
+            fn_dump_manager.put(next_module, ir_filename)
+        if (fn_override_manager is not None and fn_override_manager.has_file(ir_filename)):
+            print(f"\nOverriding kernel with file {ir_filename}")
+            full_name = fn_override_manager.get_file(ir_filename)
+            next_module = parse(full_name, ext, context)
+        # use an env variable to parse ttgir from file
+        if use_ttgir_loc and ext == "ttgir":
+            ttgir_full_name = fn_cache_manager.get_file(ir_filename)
+            next_module.create_location_snapshot(ttgir_full_name)
+            print(f"Create new locations for {ttgir_full_name}")
+        module = next_module
+    # write-back metadata
+    metadata_group[metadata_filename] = fn_cache_manager.put(json.dumps(metadata, default=vars), metadata_filename,
+                                                             binary=False)
+    fn_cache_manager.put_group(metadata_filename, metadata_group)
+    # return handle to compiled kernel
+    return CompiledKernel(src, metadata_group, hash)
+```
 
 
 

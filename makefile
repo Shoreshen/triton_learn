@@ -7,14 +7,17 @@ LLVM_HASH = $(shell cat ./triton/cmake/llvm-hash.txt)
 TEXT =
 # tools ==================================================================================
 search_text:
-	grep -rn --exclude="*.o" --exclude="*.so" "$(TEXT)" .
-# LLVM Build =============================================================================
+	grep -rn --exclude="*.o" --exclude="*.so" --exclude="*.a" "$(TEXT)" .
+# LLVM ===================================================================================
 checkout_hash:
 	cd llvm-project && git checkout $(LLVM_HASH)
 config_llvm:
 	cd llvm-project && cmake -G Ninja -S llvm -B build -DCMAKE_INSTALL_PREFIX=../bin -DCMAKE_BUILD_TYPE=Debug -DLLVM_ENABLE_ASSERTIONS=ON -DLLVM_ENABLE_PROJECTS="mlir;llvm" -DLLVM_TARGETS_TO_BUILD="host;NVPTX;AMDGPU;RISCV" -DLLVM_PARALLEL_COMPILE_JOBS=32 -DLLVM_PARALLEL_LINK_JOBS=4
 build_llvm:
 	cd llvm-project/build && ninja
+clear_loc:
+	@sed -i '/^#loc[0-9]* =/d' *.ll
+	sed -i 's/ loc(\([^)]*\))//g' *.ll
 
 PHONY += checkout_hash config_llvm build_llvm
 # Triton Build ===========================================================================

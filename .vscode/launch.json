@@ -10,12 +10,45 @@
             "request": "launch",
             "program": "${workspaceFolder}/triton-project/python/tutorials/01-vector-add.py",
             "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "MLIR_ENABLE_DUMP": "1",
+                "LLVM_IR_ENABLE_DUMP": "1",
+                // "TRITON_ENABLE_LLVM_DEBUG": "1",
+                "TRITON_CACHE_DIR" : "${workspaceFolder}/.cache"
+            },
+            "args": "1>${workspaceFolder}/01-vector-add.ll 2>&1"
+        },
+        {
+            "name": "Python: 02-fused-softmax",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/triton-project/python/tutorials/02-fused-softmax.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
             "env": {
                 // "MLIR_ENABLE_DUMP": "1",
                 // "LLVM_IR_ENABLE_DUMP": "1",
                 // "TRITON_ENABLE_LLVM_DEBUG": "1",
                 "TRITON_CACHE_DIR" : "${workspaceFolder}/.cache"
-            }
+            },
+            "args": "1>${workspaceFolder}/02-fused-softmax.ll 2>&1"
+        },
+        {
+            "name": "Python: 03-matrix-multiplication",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/triton-project/python/tutorials/03-matrix-multiplication.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "preLaunchTask": "Clear Cache",
+            "env": {
+                // "MLIR_ENABLE_DUMP": "1",
+                // "LLVM_IR_ENABLE_DUMP": "1",
+                // "TRITON_ENABLE_LLVM_DEBUG": "1",
+                "TRITON_CACHE_DIR" : "${workspaceFolder}/.cache"
+            },
+            // "args": "1>${workspaceFolder}/03-matrix-multiplication.ll 2>&1"
         },
         {
             "name": "Python: triton_compile_test.py",
@@ -23,12 +56,14 @@
             "request": "launch",
             "program": "${workspaceFolder}/tests/triton_compile_test.py",
             "console": "integratedTerminal",
+            "justMyCode": false,
             "env": {
                 // "MLIR_ENABLE_DUMP": "1",
                 // "LLVM_IR_ENABLE_DUMP": "1",
                 // "TRITON_ENABLE_LLVM_DEBUG": "1",
                 "TRITON_CACHE_DIR" : "${workspaceFolder}/.cache"
-            }
+            },
+            "args": "1>${workspaceFolder}/triton_compile_test.ll 2>&1"
         },
         {
             "name": "(gdb) Attach",
@@ -44,6 +79,12 @@
                     "ignoreFailures": true
                 }
             ]
+        },
+        {
+            "name": "Clear Cache",
+            "type": "shell",
+            "request": "launch",
+            "command": "make clear_cache",
         }
     ]
 }
