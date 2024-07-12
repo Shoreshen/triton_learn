@@ -503,6 +503,355 @@ def compile(src, target=None, options=None):
     return CompiledKernel(src, metadata_group, hash)
 ```
 
+# Triton lowing IRs
+
+## Source Python Code
+
+```py
+def matmul_kernel(
+        # Pointers to matrices
+        a_ptr, b_ptr, c_ptr,
+        # Matrix dimensions
+        M, N, K,
+        # The stride variables represent how much to increase the ptr by when moving by 1
+        # element in a particular dimension. E.g. `stride_am` is how much to increase `a_ptr`
+        # by to get the element one row down (A has M rows).
+        stride_am, stride_ak,  #
+        stride_bk, stride_bn,  #
+        stride_cm, stride_cn,
+        # Meta-parameters
+        BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,  #
+        GROUP_SIZE_M: tl.constexpr,  #
+        ACTIVATION: tl.constexpr  #
+):
+    """Kernel for computing the matmul C = A x B.
+    A has shape (M, K), B has shape (K, N) and C has shape (M, N)
+    """
+    # -----------------------------------------------------------
+    # Map program ids `pid` to the block of C it should compute.
+    # This is done in a grouped ordering to promote L2 data reuse.
+    # See above `L2 Cache Optimizations` section for details.
+    pid = tl.program_id(axis=0)
+    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    num_pid_in_group = GROUP_SIZE_M * num_pid_n
+    group_id = pid // num_pid_in_group
+    first_pid_m = group_id * GROUP_SIZE_M
+    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+    pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
+    pid_n = (pid % num_pid_in_group) // group_size_m
+
+    # ----------------------------------------------------------
+    # Create pointers for the first blocks of A and B.
+    # We will advance this pointer as we move in the K direction
+    # and accumulate
+    # `a_ptrs` is a block of [BLOCK_SIZE_M, BLOCK_SIZE_K] pointers
+    # `b_ptrs` is a block of [BLOCK_SIZE_K, BLOCK_SIZE_N] pointers
+    # See above `Pointer Arithmetic` section for details
+    offs_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
+    offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+    offs_k = tl.arange(0, BLOCK_SIZE_K)
+    a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
+    b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
+
+    # -----------------------------------------------------------
+    # Iterate to compute a block of the C matrix.
+    # We accumulate into a `[BLOCK_SIZE_M, BLOCK_SIZE_N]` block
+    # of fp32 values for higher accuracy.
+    # `accumulator` will be converted back to fp16 after the loop.
+    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+        # Load the next block of A and B, generate a mask by checking the K dimension.
+        # If it is out of bounds, set it to 0.
+        a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
+        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
+        # We accumulate along the K dimension.
+        accumulator = tl.dot(a, b, accumulator)
+        # Advance the ptrs to the next K block.
+        a_ptrs += BLOCK_SIZE_K * stride_ak
+        b_ptrs += BLOCK_SIZE_K * stride_bk
+    # You can fuse arbitrary activation functions here
+    # while the accumulator is still in FP32!
+    if ACTIVATION == "leaky_relu":
+        accumulator = leaky_relu(accumulator)
+    c = accumulator.to(tl.float16)
+
+    # -----------------------------------------------------------
+    # Write back the block of the output matrix C with masks.
+    offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
+    c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
+    tl.store(c_ptrs, c, mask=c_mask)
+```
+
+## Triton IR
+
+```llvm
+module {
+  tt.func public @matmul_kernel(
+    %arg0: !tt.ptr<f16> {tt.divisibility = 16 : i32},   ; a_ptr
+    %arg1: !tt.ptr<f16> {tt.divisibility = 16 : i32},   ; b_ptr
+    %arg2: !tt.ptr<f16> {tt.divisibility = 16 : i32},   ; c_ptr
+    %arg3: i32 {tt.divisibility = 16 : i32},            ; 
+    %arg4: i32 {tt.divisibility = 16 : i32},            ; 
+    %arg5: i32 {tt.divisibility = 16 : i32},            ; K
+    %arg6: i32 {tt.divisibility = 16 : i32},            ; stride_am
+    %arg7: i32 {tt.divisibility = 16 : i32},            ; stride_bk
+    %arg8: i32 {tt.divisibility = 16 : i32}             ; stride_cm
+  ) attributes {noinline = false} {
+; First part: Calculating group partition and dimensions in group (Group is in size of [GROUP_SIZE_M, tl.cdiv(M, BLOCK_SIZE_M)])
+    ; pid = tl.program_id(axis=0)
+    %0 = tt.get_program_id x : i32
+    ; num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+    %1 = tt.call @cdiv__i32__1cconstexpr_128_(%arg3) : (i32) -> i32
+    ; num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    %2 = tt.call @cdiv__i32__1cconstexpr_256_(%arg4) : (i32) -> i32
+    ; constant: GROUP_SIZE_M
+    %c8_i32 = arith.constant 8 : i32
+    ; num_pid_in_group = GROUP_SIZE_M * num_pid_n
+    %3 = arith.muli %2, %c8_i32 : i32
+    ; group_id = pid // num_pid_in_group
+    %4 = arith.divsi %0, %3 : i32
+    ; constant: GROUP_SIZE_M
+    %c8_i32_0 = arith.constant 8 : i32
+    ; first_pid_m = group_id * GROUP_SIZE_M
+    %5 = arith.muli %4, %c8_i32_0 : i32
+    ; num_pid_m - first_pid_m
+    %6 = arith.subi %1, %5 : i32
+    ; constant: GROUP_SIZE_M
+    %c8_i32_1 = arith.constant 8 : i32
+    ; group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+    %7 = arith.minsi %6, %c8_i32_1 : i32
+    ; pid % num_pid_in_group
+    %8 = arith.remsi %0, %3 : i32
+    ; ((pid % num_pid_in_group) % group_size_m)
+    %9 = arith.remsi %8, %7 : i32
+    ; pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
+    %10 = arith.addi %5, %9 : i32
+    ; pid % num_pid_in_group
+    %11 = arith.remsi %0, %3 : i32
+    ; pid_n = (pid % num_pid_in_group) // group_size_m
+    %12 = arith.divsi %11, %7 : i32
+
+; Second part: Calculating data (matrix block) pointers
+    ; constant: BLOCK_SIZE_M
+    %c128_i32 = arith.constant 128 : i32
+    ; pid_m * BLOCK_SIZE_M
+    %13 = arith.muli %10, %c128_i32 : i32
+    ; tl.arange(0, BLOCK_SIZE_M)
+    %14 = tt.make_range {end = 128 : i32, start = 0 : i32} : tensor<128xi32>
+    ; pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    %15 = tt.splat %13 : i32 -> tensor<128xi32> ; make pid_m * BLOCK_SIZE_M the same dimension as tl.arange(0, BLOCK_SIZE_M)
+    %16 = arith.addi %15, %14 : tensor<128xi32>
+    ; offs_am = ((pid_m * BLOCK_SIZE_M) + tl.arange(0, BLOCK_SIZE_M)) % M
+    %17 = tt.splat %arg3 : i32 -> tensor<128xi32> ; Make M the same dimension as ((pid_m * BLOCK_SIZE_M) + tl.arange(0, BLOCK_SIZE_M))
+    %18 = arith.remsi %16, %17 : tensor<128xi32>
+    ; constant: BLOCK_SIZE_N
+    %c256_i32 = arith.constant 256 : i32
+    ; pid_n * BLOCK_SIZE_N
+    %19 = arith.muli %12, %c256_i32 : i32
+    ; tl.arange(0, BLOCK_SIZE_N)
+    %20 = tt.make_range {end = 256 : i32, start = 0 : i32} : tensor<256xi32>
+    ; pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    %21 = tt.splat %19 : i32 -> tensor<256xi32> ; make pid_n * BLOCK_SIZE_N the same dimension as tl.arange(0, BLOCK_SIZE_N)
+    %22 = arith.addi %21, %20 : tensor<256xi32>
+    ; offs_bn = ((pid_n * BLOCK_SIZE_N) + tl.arange(0, BLOCK_SIZE_N)) % N
+    %23 = tt.splat %arg4 : i32 -> tensor<256xi32> ; Make N the same dimension as ((pid_n * BLOCK_SIZE_N) + tl.arange(0, BLOCK_SIZE_N))
+    %24 = arith.remsi %22, %23 : tensor<256xi32>
+    ; offs_k = tl.arange(0, BLOCK_SIZE_K)
+    %25 = tt.make_range {end = 64 : i32, start = 0 : i32} : tensor<64xi32>
+    ; offs_am[:, None]
+    %26 = tt.expand_dims %18 {axis = 1 : i32} : tensor<128xi32> -> tensor<128x1xi32>
+    ; (offs_am[:, None]) * stride_am
+    %27 = tt.splat %arg6 : i32 -> tensor<128x1xi32> ; Make stride_am the same dimension as (offs_am[:, None])
+    %28 = arith.muli %26, %27 : tensor<128x1xi32>
+    ; offs_k[None, :]
+    %29 = tt.expand_dims %25 {axis = 0 : i32} : tensor<64xi32> -> tensor<1x64xi32>
+    ; offs_k[None, :] * stride_ak
+    %c1_i32 = arith.constant 1 : i32 ; stride_ak optimized to constant
+    %cst = arith.constant dense<1> : tensor<1x64xi32> ; expend to the same dimention of offs_k[None, :]
+    %30 = arith.muli %29, %cst : tensor<1x64xi32>
+    ; ((offs_am[:, None]) * stride_am) + (offs_k[None, :])
+    %31 = tt.broadcast %28 : tensor<128x1xi32> -> tensor<128x64xi32> ; expand (offs_am[:, None]) * stride_am) to dimention of [dim(offs_am[:, None]) * stride_am), dim(offs_k[None, :])]
+    %32 = tt.broadcast %30 : tensor<1x64xi32> -> tensor<128x64xi32> ; expand (offs_k[None, :]) * stride_ak) to dimention of [dim(offs_am[:, None]) * stride_am), dim(offs_k[None, :])]
+    %33 = arith.addi %31, %32 : tensor<128x64xi32>
+    ; a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
+    %34 = tt.splat %arg0 : !tt.ptr<f16> -> tensor<128x64x!tt.ptr<f16>> ; Make a_ptr the same dimension as (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
+    %35 = tt.addptr %34, %33 : tensor<128x64x!tt.ptr<f16>>, tensor<128x64xi32>
+    ; offs_k[:, None]
+    %36 = tt.expand_dims %25 {axis = 1 : i32} : tensor<64xi32> -> tensor<64x1xi32>
+    ; (offs_k[:, None]) * stride_bk
+    %37 = tt.splat %arg7 : i32 -> tensor<64x1xi32> ; Make stride_bn the same dimension as (offs_k[:, None])
+    %38 = arith.muli %36, %37 : tensor<64x1xi32> 
+    ; offs_bn[None, :]
+    %39 = tt.expand_dims %24 {axis = 0 : i32} : tensor<256xi32> -> tensor<1x256xi32>
+    ; (offs_bn[None, :]) * stride_bn
+    %c1_i32_2 = arith.constant 1 : i32 ; stride_bn optimized to constant
+    %cst_3 = arith.constant dense<1> : tensor<1x256xi32> ; expend to the same dimention of offs_bn[None, :]
+    %40 = arith.muli %39, %cst_3 : tensor<1x256xi32>
+    ; ((offs_k[:, None]) * stride_bk) + ((offs_bn[None, :]) * stride_bn)
+    %41 = tt.broadcast %38 : tensor<64x1xi32> -> tensor<64x256xi32> ; expand (offs_k[:, None]) * stride_bk) to dimention of [dim(offs_k[:, None]) * stride_bk), dim(offs_bn[None, :])]
+    %42 = tt.broadcast %40 : tensor<1x256xi32> -> tensor<64x256xi32> ; expand (offs_bn[None, :]) * stride_bn) to dimention of [dim(offs_k[:, None]) * stride_bk), dim(offs_bn[None, :])]
+    %43 = arith.addi %41, %42 : tensor<64x256xi32>
+    ; b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
+    %44 = tt.splat %arg1 : !tt.ptr<f16> -> tensor<64x256x!tt.ptr<f16>> ; Make b_ptr the same dimension as (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
+    %45 = tt.addptr %44, %43 : tensor<64x256x!tt.ptr<f16>>, tensor<64x256xi32>
+    ; accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    %46 = tt.call @"zeros____0cconstexpr_(constexpr_128_, constexpr_256_)__1cconstexpr_fp32_"() : () -> tensor<128x256xf32>
+    ; tl.cdiv(K, BLOCK_SIZE_K)
+    %47 = tt.call @cdiv__i32__1cconstexpr_64_(%arg5) : (i32) -> i32
+
+; Third part: Main loop
+    ; for k in range(0, tl.cdiv(K, BLOCK_SIZE_K))
+    %c0_i32 = arith.constant 0 : i32 ; start from 0
+    %c1_i32_4 = arith.constant 1 : i32 ; step by 1
+    %48 = arith.bitcast %c0_i32 : i32 to i32 ; type convert
+    %49 = arith.bitcast %47 : i32 to i32 ; type convert
+    %50 = arith.bitcast %c1_i32_4 : i32 to i32 ; type convert
+    %51 = llvm.mlir.undef : i32 ; no use
+    %52:3 = scf.for %arg9 = %48 to %49 step %50 iter_args(%arg10 = %46, %arg11 = %35, %arg12 = %45) -> (tensor<128x256xf32>, tensor<128x64x!tt.ptr<f16>>, tensor<64x256x!tt.ptr<f16>>)  : i32 {
+      ; offs_k[None, :]
+      %81 = tt.expand_dims %25 {axis = 0 : i32} : tensor<64xi32> -> tensor<1x64xi32>
+      ; constant: BLOCK_SIZE_K
+      %c64_i32 = arith.constant 64 : i32
+      ; k * BLOCK_SIZE_K
+      %82 = arith.muli %arg9, %c64_i32 : i32
+      ; K - (k * BLOCK_SIZE_K)
+      %83 = arith.subi %arg5, %82 : i32
+      ; (offs_k[None, :]) < (K - (k * BLOCK_SIZE_K))
+      %84 = tt.splat %83 : i32 -> tensor<1x64xi32> ; Make K - (k * BLOCK_SIZE_K) the same dimension as offs_k[None, :]
+      %85 = arith.cmpi slt, %81, %84 : tensor<1x64xi32>
+      ; a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
+      %cst_9 = arith.constant 0.000000e+00 : f32 ; constant: 0.0
+      %86 = tt.broadcast %85 : tensor<1x64xi1> -> tensor<128x64xi1> ; expand (offs_k[None, :]) < (K - (k * BLOCK_SIZE_K)) to dimention of [dim(offs_k[None, :]) < (K - (k * BLOCK_SIZE_K))]
+      %cst_10 = arith.constant dense<0.000000e+00> : tensor<128x64xf32> ; other=0.0
+      %87 = arith.truncf %cst_10 : tensor<128x64xf32> to tensor<128x64xf16> ; type convertion
+      %88 = tt.load %arg11, %86, %87 : tensor<128x64x!tt.ptr<f16>>
+      ; offs_k[:, None]
+      %89 = tt.expand_dims %25 {axis = 1 : i32} : tensor<64xi32> -> tensor<64x1xi32>
+      ; constant: BLOCK_SIZE_K
+      %c64_i32_11 = arith.constant 64 : i32
+      ; k * BLOCK_SIZE_K
+      %90 = arith.muli %arg9, %c64_i32_11 : i32
+      ; K - k * BLOCK_SIZE_K
+      %91 = arith.subi %arg5, %90 : i32
+      ; offs_k[:, None] < K - k * BLOCK_SIZE_K
+      %92 = tt.splat %91 : i32 -> tensor<64x1xi32>
+      %93 = arith.cmpi slt, %89, %92 : tensor<64x1xi32>
+      ; b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
+      %cst_12 = arith.constant 0.000000e+00 : f32
+      %94 = tt.broadcast %93 : tensor<64x1xi1> -> tensor<64x256xi1>
+      %cst_13 = arith.constant dense<0.000000e+00> : tensor<64x256xf32>
+      %95 = arith.truncf %cst_13 : tensor<64x256xf32> to tensor<64x256xf16>
+      %96 = tt.load %arg12, %94, %95 : tensor<64x256x!tt.ptr<f16>>
+      ; c = tl.matmul(a, b, c, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K)
+      %cst_14 = arith.constant 0.000000e+00 : f32 ; no use
+      %97 = tt.dot %88, %96, %arg10, inputPrecision = tf32 : tensor<128x64xf16> * tensor<64x256xf16> -> tensor<128x256xf32>
+      ; constant: BLOCK_SIZE_K
+      %c64_i32_15 = arith.constant 64 : i32
+      ; a_ptrs += BLOCK_SIZE_K * stride_ak
+      %cst_16 = arith.constant dense<64> : tensor<128x64xi32> ; stride_ak optimized to 1
+      %98 = tt.addptr %arg11, %cst_16 : tensor<128x64x!tt.ptr<f16>>, tensor<128x64xi32>
+      ; constant: BLOCK_SIZE_K
+      %c64_i32_17 = arith.constant 64 : i32
+      ; BLOCK_SIZE_K * stride_bk
+      %99 = arith.muli %arg7, %c64_i32_17 : i32
+      ; b_ptrs += BLOCK_SIZE_K * stride_bk
+      %100 = tt.splat %99 : i32 -> tensor<64x256xi32>
+      %101 = tt.addptr %arg12, %100 : tensor<64x256x!tt.ptr<f16>>, tensor<64x256xi32>
+      ; Update loop variables: %arg10 = %97(new accumulator), %arg11 = %98(new a_ptrs), %arg12 = %101(new b_ptrs)
+      scf.yield %97, %98, %101 : tensor<128x256xf32>, tensor<128x64x!tt.ptr<f16>>, tensor<64x256x!tt.ptr<f16>>
+    }
+
+; Fourth part: Store the result back to c_ptr
+    ; %52#0 = %arg10 = accumulator, type convertion to f16
+    %53 = arith.truncf %52#0 : tensor<128x256xf32> to tensor<128x256xf16>
+    ; pid_m * BLOCK_SIZE_M
+    %c128_i32_5 = arith.constant 128 : i32 ; constant: BLOCK_SIZE_M
+    %54 = arith.muli %10, %c128_i32_5 : i32
+    ; tl.arange(0, BLOCK_SIZE_M)
+    %55 = tt.make_range {end = 128 : i32, start = 0 : i32} : tensor<128xi32>
+    ; offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    %56 = tt.splat %54 : i32 -> tensor<128xi32>
+    %57 = arith.addi %56, %55 : tensor<128xi32>
+    ; pid_n * BLOCK_SIZE_N
+    %c256_i32_6 = arith.constant 256 : i32 ; constant: BLOCK_SIZE_N
+    %58 = arith.muli %12, %c256_i32_6 : i32
+    ; offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    %59 = tt.make_range {end = 256 : i32, start = 0 : i32} : tensor<256xi32>
+    %60 = tt.splat %58 : i32 -> tensor<256xi32>
+    %61 = arith.addi %60, %59 : tensor<256xi32>
+    ; offs_cm[:, None]
+    %62 = tt.expand_dims %57 {axis = 1 : i32} : tensor<128xi32> -> tensor<128x1xi32>
+    ; (offs_cm[:, None]) * stride_cm
+    %63 = tt.splat %arg8 : i32 -> tensor<128x1xi32>
+    %64 = arith.muli %63, %62 : tensor<128x1xi32>
+    ; c_ptr + stride_cm * offs_cm[:, None]
+    %65 = tt.splat %arg2 : !tt.ptr<f16> -> tensor<128x1x!tt.ptr<f16>>
+    %66 = tt.addptr %65, %64 : tensor<128x1x!tt.ptr<f16>>, tensor<128x1xi32>
+    ; offs_cn[None, :]
+    %67 = tt.expand_dims %61 {axis = 0 : i32} : tensor<256xi32> -> tensor<1x256xi32>
+    ; stride_cn * offs_cn[None, :]
+    %c1_i32_7 = arith.constant 1 : i32 ; stride_cn optimized to 1
+    %cst_8 = arith.constant dense<1> : tensor<1x256xi32>
+    %68 = arith.muli %67, %cst_8 : tensor<1x256xi32>
+    ; c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
+    %69 = tt.broadcast %66 : tensor<128x1x!tt.ptr<f16>> -> tensor<128x256x!tt.ptr<f16>>
+    %70 = tt.broadcast %68 : tensor<1x256xi32> -> tensor<128x256xi32>
+    %71 = tt.addptr %69, %70 : tensor<128x256x!tt.ptr<f16>>, tensor<128x256xi32>
+    ; offs_cm[:, None]
+    %72 = tt.expand_dims %57 {axis = 1 : i32} : tensor<128xi32> -> tensor<128x1xi32>
+    ; offs_cm[:, None] < M
+    %73 = tt.splat %arg3 : i32 -> tensor<128x1xi32>
+    %74 = arith.cmpi slt, %72, %73 : tensor<128x1xi32>
+    ; offs_cn[None, :]
+    %75 = tt.expand_dims %61 {axis = 0 : i32} : tensor<256xi32> -> tensor<1x256xi32>
+    ; offs_cn[None, :] < N
+    %76 = tt.splat %arg4 : i32 -> tensor<1x256xi32>
+    %77 = arith.cmpi slt, %75, %76 : tensor<1x256xi32>
+    ; c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
+    %78 = tt.broadcast %74 : tensor<128x1xi1> -> tensor<128x256xi1>
+    %79 = tt.broadcast %77 : tensor<1x256xi1> -> tensor<128x256xi1>
+    %80 = arith.andi %78, %79 : tensor<128x256xi1>
+    ; tl.store(c_ptrs, c, mask=c_mask)
+    tt.store %71, %53, %80 : tensor<128x256x!tt.ptr<f16>>
+    tt.return
+  }
+  tt.func private @cdiv__i32__1cconstexpr_128_(%arg0: i32) -> i32 attributes {noinline = false} {
+    %c128_i32 = arith.constant 128 : i32
+    %0 = arith.addi %arg0, %c128_i32 : i32
+    %c1_i32 = arith.constant 1 : i32
+    %1 = arith.subi %0, %c1_i32 : i32
+    %c128_i32_0 = arith.constant 128 : i32
+    %2 = arith.divsi %1, %c128_i32_0 : i32
+    tt.return %2 : i32
+  }
+  tt.func private @cdiv__i32__1cconstexpr_256_(%arg0: i32) -> i32 attributes {noinline = false} {
+    %c256_i32 = arith.constant 256 : i32
+    %0 = arith.addi %arg0, %c256_i32 : i32
+    %c1_i32 = arith.constant 1 : i32
+    %1 = arith.subi %0, %c1_i32 : i32
+    %c256_i32_0 = arith.constant 256 : i32
+    %2 = arith.divsi %1, %c256_i32_0 : i32
+    tt.return %2 : i32
+  }
+  tt.func private @"zeros____0cconstexpr_(constexpr_128_, constexpr_256_)__1cconstexpr_fp32_"() -> tensor<128x256xf32> attributes {noinline = false} {
+    %cst = arith.constant 0.000000e+00 : f32
+    %cst_0 = arith.constant dense<0.000000e+00> : tensor<128x256xf32>
+    tt.return %cst_0 : tensor<128x256xf32>
+  }
+  tt.func private @cdiv__i32__1cconstexpr_64_(%arg0: i32) -> i32 attributes {noinline = false} {
+    %c64_i32 = arith.constant 64 : i32
+    %0 = arith.addi %arg0, %c64_i32 : i32
+    %c1_i32 = arith.constant 1 : i32
+    %1 = arith.subi %0, %c1_i32 : i32
+    %c64_i32_0 = arith.constant 64 : i32
+    %2 = arith.divsi %1, %c64_i32_0 : i32
+    tt.return %2 : i32
+  }
+}
+```
 
 
 # Appendix
