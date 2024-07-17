@@ -587,7 +587,7 @@ def matmul_kernel(
 
 ## Triton IR
 
-```llvm
+```ll
 module {
   tt.func public @matmul_kernel(
     %arg0: !tt.ptr<f16> {tt.divisibility = 16 : i32},   ; a_ptr

@@ -5,17 +5,52 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "Python 调试程序: 当前文件",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "preLaunchTask": "Clear Cache",
+            "env": {
+                // "MLIR_ENABLE_DUMP": "1",
+                // "LLVM_IR_ENABLE_DUMP": "1",
+                // "TRITON_ENABLE_LLVM_DEBUG": "1",
+                "TRITON_CACHE_DIR": "${workspaceFolder}/.cache",
+                "TMPDIR": "${workspaceFolder}/.tmp"
+            },
+        },
+        {
+            "name": "Python: matmul_case_1.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/tests/matmul_case_1.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "preLaunchTask": "Clear Cache",
+            "env": {
+                // "MLIR_ENABLE_DUMP": "1",
+                // "LLVM_IR_ENABLE_DUMP": "1",
+                // "TRITON_ENABLE_LLVM_DEBUG": "1",
+                "TRITON_CACHE_DIR": "${workspaceFolder}/.cache",
+                "TMPDIR": "${workspaceFolder}/.tmp"
+            },
+            // "args": "1>${workspaceFolder}/matmul_case_1.ll 2>&1"
+        },
+        {
             "name": "Python: 01-vector-add",
             "type": "debugpy",
             "request": "launch",
             "program": "${workspaceFolder}/triton-project/python/tutorials/01-vector-add.py",
             "console": "integratedTerminal",
             "justMyCode": false,
+            "preLaunchTask": "Clear Cache",
             "env": {
                 "MLIR_ENABLE_DUMP": "1",
                 "LLVM_IR_ENABLE_DUMP": "1",
                 // "TRITON_ENABLE_LLVM_DEBUG": "1",
-                "TRITON_CACHE_DIR" : "${workspaceFolder}/.cache"
+                "TRITON_CACHE_DIR": "${workspaceFolder}/.cache",
+                "TMPDIR": "${workspaceFolder}/.tmp"
             },
             "args": "1>${workspaceFolder}/01-vector-add.ll 2>&1"
         },
@@ -26,11 +61,13 @@
             "program": "${workspaceFolder}/triton-project/python/tutorials/02-fused-softmax.py",
             "console": "integratedTerminal",
             "justMyCode": false,
+            "preLaunchTask": "Clear Cache",
             "env": {
                 // "MLIR_ENABLE_DUMP": "1",
                 // "LLVM_IR_ENABLE_DUMP": "1",
                 // "TRITON_ENABLE_LLVM_DEBUG": "1",
-                "TRITON_CACHE_DIR" : "${workspaceFolder}/.cache"
+                "TRITON_CACHE_DIR": "${workspaceFolder}/.cache",
+                "TMPDIR": "${workspaceFolder}/.tmp"
             },
             "args": "1>${workspaceFolder}/02-fused-softmax.ll 2>&1"
         },
@@ -46,7 +83,8 @@
                 // "MLIR_ENABLE_DUMP": "1",
                 // "LLVM_IR_ENABLE_DUMP": "1",
                 // "TRITON_ENABLE_LLVM_DEBUG": "1",
-                "TRITON_CACHE_DIR" : "${workspaceFolder}/.cache"
+                "TRITON_CACHE_DIR": "${workspaceFolder}/.cache",
+                "TMPDIR": "${workspaceFolder}/.tmp"
             },
             // "args": "1>${workspaceFolder}/03-matrix-multiplication.ll 2>&1"
         },
@@ -57,11 +95,13 @@
             "program": "${workspaceFolder}/tests/triton_compile_test.py",
             "console": "integratedTerminal",
             "justMyCode": false,
+            "preLaunchTask": "Clear Cache",
             "env": {
                 // "MLIR_ENABLE_DUMP": "1",
                 // "LLVM_IR_ENABLE_DUMP": "1",
                 // "TRITON_ENABLE_LLVM_DEBUG": "1",
-                "TRITON_CACHE_DIR" : "${workspaceFolder}/.cache"
+                "TRITON_CACHE_DIR": "${workspaceFolder}/.cache",
+                "TMPDIR": "${workspaceFolder}/.tmp"
             },
             "args": "1>${workspaceFolder}/triton_compile_test.ll 2>&1"
         },
@@ -79,12 +119,6 @@
                     "ignoreFailures": true
                 }
             ]
-        },
-        {
-            "name": "Clear Cache",
-            "type": "shell",
-            "request": "launch",
-            "command": "make clear_cache",
         }
     ]
 }

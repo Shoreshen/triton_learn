@@ -34,8 +34,9 @@ deactive_venv:
 	- deactivate
 clear_cache:
 	find . -type d -name "__pycache__" -exec rm -r {} +
-	rm -rf /tmp/torchinductor_shore
-	rm -rf ./.cache/*
+	- rm -rf /tmp/torchinductor_shore
+	- rm -rf ./.cache/*
+	- rm -rf ./.tmp/*
 
 PHONY += active_venv deactive_venv clear_cache
 # git ====================================================================================
