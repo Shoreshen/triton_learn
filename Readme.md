@@ -455,6 +455,8 @@ def ast_to_ttir(fn, specialization, context, options, codegen_fns):
     return ret
 ```
 
+The `fn.parse()` command will call python's parser, and return python ast.
+
 ### Step 3
 
 Setting up each lowering stage in the compilation pipeline, the main compilation process focuses on the following code:
@@ -502,6 +504,18 @@ def compile(src, target=None, options=None):
     # return handle to compiled kernel
     return CompiledKernel(src, metadata_group, hash)
 ```
+
+The `backend.load_dialects(context)` will call backend specific (Nvidia, amd, ...). Each stage will try to lower `module` and produce `next_module`.
+
+## Auto tunner
+
+By adding `@triton.autotune` decorator to the function, it allows users to pass in multiple set of configurations, and allow users to set system configurations of the following:
+
+1. `num_warps`: Number of warps per CTA, so the total thread number of a CTA is `32 * num_warps`
+2. `num_stages`: Number of wait group can be applied, see  
+   1. GPU will provide async instructions, and thread can issue them. 
+   2. The issued async instructions than be grouped (so as wait group), and syncronization instructions can be used to wait for specific group to be finished.
+   3. See [`cp.async`](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async), [`cp.async.commit_group`](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-commit-group) and [`cp.async.wait_group`](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-wait-group) as example. Also see [Asynchronous Operations](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#program-order-async-operations) section
 
 # Triton lowing IRs
 
@@ -587,7 +601,7 @@ def matmul_kernel(
 
 ## Triton IR
 
-```ll
+```llvm
 module {
   tt.func public @matmul_kernel(
     %arg0: !tt.ptr<f16> {tt.divisibility = 16 : i32},   ; a_ptr
@@ -892,7 +906,83 @@ module attributes {"triton_gpu.num-ctas" = 1 : i32, "triton_gpu.num-warps" = 4 :
 }
 ```
 
-### Shared memory encoding and Swizzling
+### Memory layout
+
+#### Distributed
+
+##### Block
+
+Distributed memory layout of tensor with the following parameters:
+
+1. `sizePerThread`: The size of tensor owned by a thread
+2. `threadPerWarp`: Number of `sizePerThread` owned by a warp
+3. `warpsPerCTA`: Number of `threadPerWarp` owned by a CTA
+4. `CTAsPerCGA` & `CTASplitNum`: Not going to discussed here
+
+For a 2D tensor `A` with the offset address of `A[i,j]` can be calculated as `offset = (i * num_col + j) * byte_per_element` the thread that owns `A[i,j]` can be calculated as follow:
+
+```c
+struct {
+    int CTAnum;
+    int warpNum;
+    int threadNum;
+} threadLoc;
+
+threadLoc calcLaneID(int i, int j, int sizePerThread[2], int threadPerWarp[2], int warpsPerCTA[2]) {
+    threadLoc loc;
+    int sizePerWarp[2], sizePerCTA[2];
+    
+    sizePerWarp[0] = sizePerThread[0] * threadPerWarp[0];
+    sizePerWarp[1] = sizePerThread[1] * threadPerWarp[1];
+    sizePerCTA[0] = sizePerWarp[0] * warpsPerCTA[0];
+    sizePerCTA[1] = sizePerWarp[1] * warpsPerCTA[1];
+    
+    int CTA_row = i / sizePerCTA[0];
+    int CTA_col = j / sizePerCTA[1];
+    loc.CTAnum = CTA_row * warpsPerCTA[1] + CTA_col;
+
+    int warp_row = (i % sizePerCTA[0]) / sizePerWarp[0];
+    int warp_col = (j % sizePerCTA[1]) / sizePerWarp[1];
+    loc.warpNum = warp_row * warpsPerCTA[1] + warp_col;
+
+    int lane_row = (i % sizePerWarp[0]) / sizePerThread[0];
+    int lane_col = (j % sizePerWarp[1]) / sizePerThread[1];
+    loc.threadNum = lane_row * threadPerWarp[1] + lane_col;
+
+    return loc;
+}
+```
+
+##### nvidia_mma
+
+Memory layout specifically designed for Nvidia's [mma](#mma-1) operation. It has the following parameters:
+
+1. `versionMajor` & `versionMinor`: The version of the mma operation
+2. `warpsPerCTA`: The number of warps per CTA
+3. `CTAlayout`: Not used for now
+4. `instrShape`: `m` and `n` of [`mma`](#nvidia_mma) instruction. Example of `mma.sync.aligned.m16n8k16` has the shape of `[16, 8]`
+
+The detailed position mapping need further investigation.
+
+##### Slice
+
+##### DotOperand
+
+Memory layout of matrix `A` and `B` for matrix produce of `D = AB + C`, having the following  parameters:
+
+1. `opIdx`: The index of the operand in the dot operation. (A = 0, B = 1)
+2. `parent`: A [mma layout](#nvidia_mma) attribute. Indicating detailed layout of the memory
+3. `kWidth`: The number of consecutive elements stored by one thread along k dimension
+
+Note that for Nvidia's [mma](#mma-1) operation for `D = AB + C` all of `A`, `B`, `C` and `D` should would be stored in thread's register across one warp. Thus all of them need [distributed](#distributed) memory layout.
+
+This is the reason of adding [mma](#nvidia_mma) layout.
+
+#### Shared 
+
+Meaning memory that can be accessed by all threads in CTA (or block). One of the example would be shared memory in CUDA.
+
+##### Swizzling
 
 Pre-definitions:
 
@@ -913,7 +1003,9 @@ int offset (int i, int j, int num_col, int byte_per_element, int vec, int perPha
 }
 ```
 
-The reason of swizzling is to avoid bank conflict, see [this post](https://github.com/triton-lang/triton/discussions/2026)
+The reason of swizzling is to avoid bank conflict, see [this post](https://github.com/triton-lang/triton/discussions/2026).
+
+For Nvidia device, the `vec` should be 8, since [`ldmatrix`](#ldmatrix) instruction can switch rows of 8 element of f16 by adjusting `%lane.s0` register.
 
 ## PTX
 
@@ -1081,7 +1173,7 @@ Illustration:
 1. Basically, the `i`'th `[8, 8]` matrix will be stored in destination register `di` of each thread
 2. The part that each register holds are same as the figure in official document:
    <img src=https://docs.nvidia.com/cuda/parallel-thread-execution/_images/mma-ldmatrix-fragments.png>
-3. The start address of `i`'th matrix's `n`'th row of 8 elements (2 byte) will be stored at the address of `%(i * 8 + j).s0`. Thus the matrix do not be continues in memory. This provide the possibility of [Swizzling](#shared-memory-encoding-and-swizzling)
+3. The start address of `i`'th matrix's `n`'th row of 8 elements (2 byte) will be stored at the address of `%(i * 8 + j).s0`. Thus the matrix do not be continues in memory. This provide the possibility of [Swizzling](#swizzling)
 
 ### mma
 
@@ -1119,7 +1211,7 @@ ALoc calcTheadLoc(int i, int j)
 
 #### matrix B
 
-By definition of the instruction, matrix A has the shape of `[16, 8]` with each element tooks 4 byte
+By definition of the instruction, matrix A has the shape of `[16, 8]` with each element tooks 2 byte
 
 Element of `B[i,j]` will be stored in:
 
@@ -1127,12 +1219,19 @@ Element of `B[i,j]` will be stored in:
 struct {
     int laneID;
     int dIdx;
+    int high; // 0 in the low 16 bit, 1 in the high 16 bit
 } BLoc;
 
 BLoc calcTheadLoc(int i, int j) 
 {
     BLoc loc;
-
+    int sub_mat = i / 8;
+    int row_in_sub_mat = i % 8;
+    int col_in_sub_mat = j;
+    loc.high = i % 2;
+    loc.aIdx = sub_mat + i % 2;
+    // two dst registers of same thread will store 2 elements (since each elements tooks 2 byte)
+    loc.landID = j * 4 + i / 2;
     return loc;
 }
 ```
