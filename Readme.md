@@ -953,6 +953,61 @@ threadLoc calcLaneID(int i, int j, int sizePerThread[2], int threadPerWarp[2], i
 }
 ```
 
+For nD tensor, `A` with the offset address of `A[i_1,...,i_n]` can be calculated as `offset = (i_1 * stride_1 + ... + i_{n-1} * stride_{n-1} + ... + i_n) * byte_per_element` the thread that owns `A[i_1,...,i_n]` can be calculated as follow:
+
+```c
+struct {
+    int CTAnum;
+    int warpNum;
+    int threadNum;
+} threadLoc;
+
+threadLoc calcLaneID(int i, int j, int sizePerThread[n], int threadPerWarp[n], int warpsPerCTA[n]) {
+    threadLoc loc;
+    int sizePerWarp[n], sizePerCTA[n], CTA[n], warp[n], lane[n];
+    
+    for (int i = 0; i < n; i++) {
+        sizePerWarp[i] = sizePerThread[i] * threadPerWarp[i];
+    }
+
+    for (int i = 0; i < n; i++) {
+        sizePerCTA[i] = sizePerWarp[i] * warpsPerCTA[i];
+    }
+
+    // CTA offset
+    for (int i = 0; i < n; i++) {
+        CTA[i] = i / sizePerCTA[i];
+    }
+    int stride = 1;
+    for (int i = n - 1; i >= 0; i--) {
+        loc.CTAnum += CTA[i] * stride;
+        stride *= sizePerCTA[i];
+    }
+
+    // warp offset
+    for (int i = 0; i < n; i++) {
+        warp[i] = (i % sizePerCTA[i]) / sizePerWarp[i];
+    }
+    stride = 1;
+    for (int i = n - 1; i >= 0; i--) {
+        loc.warpNum += warp[i] * stride;
+        stride *= sizePerWarp[i];
+    }
+
+    // thread offset
+    for (int i = 0; i < n; i++) {
+        lane[i] = (i % sizePerWarp[i]) / sizePerThread[i];
+    }
+    stride = 1;
+    for (int i = n - 1; i >= 0; i--) {
+        loc.threadNum += lane[i] * stride;
+        stride *= sizePerThread[i];
+    }
+
+    return loc;
+}
+```
+
 ##### nvidia_mma
 
 Memory layout specifically designed for Nvidia's [mma](#mma-1) operation. It has the following parameters:
