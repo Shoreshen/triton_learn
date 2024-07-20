@@ -78,6 +78,10 @@
         "unordered_set": "cpp",
         "valarray": "cpp",
         "chrono": "cpp",
-        "ranges": "cpp"
+        "ranges": "cpp",
+        "hash_set": "cpp",
+        "bitset": "cpp",
+        "queue": "cpp",
+        "stack": "cpp"
     }
 }

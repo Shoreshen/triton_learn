@@ -853,6 +853,315 @@ module {
 }
 ```
 
+## Triton GPU IR
+
+```llvm
+#blocked = #triton_gpu.blocked<{sizePerThread = [1, 2], threadsPerWarp = [4, 8], warpsPerCTA = [4, 1], order = [1, 0]}>
+#mma = #triton_gpu.nvidia_mma<{versionMajor = 2, versionMinor = 0, warpsPerCTA = [1, 4], instrShape = [16, 8]}>
+#shared = #triton_gpu.shared<{vec = 8, perPhase = 4, maxPhase = 2, order = [1, 0], hasLeadingOffset = false}>
+module attributes {"triton_gpu.num-ctas" = 1 : i32, "triton_gpu.num-warps" = 4 : i32, triton_gpu.target = "cuda:89", "triton_gpu.threads-per-warp" = 32 : i32} {
+  tt.func public @matmul_kernel_m16n16k16(%arg0: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg1: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg2: !tt.ptr<f16> {tt.divisibility = 16 : i32}) attributes {noinline = false} {
+    %cst = arith.constant dense<0.000000e+00> : tensor<16x16xf32, #mma>
+    %cst_0 = arith.constant dense<16> : tensor<16x1xi32, #blocked>
+    %0 = tt.make_range {end = 16 : i32, start = 0 : i32} : tensor<16xi32, #triton_gpu.slice<{dim = 1, parent = #blocked}>>
+    %1 = tt.expand_dims %0 {axis = 1 : i32} : tensor<16xi32, #triton_gpu.slice<{dim = 1, parent = #blocked}>> -> tensor<16x1xi32, #blocked>
+    %2 = arith.muli %1, %cst_0 : tensor<16x1xi32, #blocked>
+    %3 = tt.make_range {end = 16 : i32, start = 0 : i32} : tensor<16xi32, #triton_gpu.slice<{dim = 0, parent = #blocked}>>
+    %4 = tt.expand_dims %3 {axis = 0 : i32} : tensor<16xi32, #triton_gpu.slice<{dim = 0, parent = #blocked}>> -> tensor<1x16xi32, #blocked>
+    %5 = tt.broadcast %2 : tensor<16x1xi32, #blocked> -> tensor<16x16xi32, #blocked>
+    %6 = tt.broadcast %4 : tensor<1x16xi32, #blocked> -> tensor<16x16xi32, #blocked>
+    %7 = arith.addi %5, %6 : tensor<16x16xi32, #blocked>
+    %8 = tt.splat %arg0 : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>, #blocked>
+    %9 = tt.addptr %8, %7 : tensor<16x16x!tt.ptr<f16>, #blocked>, tensor<16x16xi32, #blocked>
+    %10 = tt.splat %arg1 : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>, #blocked>
+    %11 = tt.addptr %10, %7 : tensor<16x16x!tt.ptr<f16>, #blocked>, tensor<16x16xi32, #blocked>
+    %12 = tt.load %9 : tensor<16x16x!tt.ptr<f16>, #blocked>
+    %13 = triton_gpu.local_alloc %12 : (tensor<16x16xf16, #blocked>) -> !tt.memdesc<16x16xf16, #shared, #triton_gpu.shared_memory>
+    %14 = tt.load %11 : tensor<16x16x!tt.ptr<f16>, #blocked>
+    %15 = triton_gpu.local_alloc %14 : (tensor<16x16xf16, #blocked>) -> !tt.memdesc<16x16xf16, #shared, #triton_gpu.shared_memory>
+    %16 = triton_gpu.local_load %13 : !tt.memdesc<16x16xf16, #shared, #triton_gpu.shared_memory> -> tensor<16x16xf16, #triton_gpu.dot_op<{opIdx = 0, parent = #mma, kWidth = 2}>>
+    %17 = triton_gpu.local_load %15 : !tt.memdesc<16x16xf16, #shared, #triton_gpu.shared_memory> -> tensor<16x16xf16, #triton_gpu.dot_op<{opIdx = 1, parent = #mma, kWidth = 2}>>
+    %18 = tt.dot %16, %17, %cst, inputPrecision = tf32 : tensor<16x16xf16, #triton_gpu.dot_op<{opIdx = 0, parent = #mma, kWidth = 2}>> * tensor<16x16xf16, #triton_gpu.dot_op<{opIdx = 1, parent = #mma, kWidth = 2}>> -> tensor<16x16xf32, #mma>
+    %19 = triton_gpu.convert_layout %18 : tensor<16x16xf32, #mma> -> tensor<16x16xf32, #blocked>
+    %20 = arith.truncf %19 : tensor<16x16xf32, #blocked> to tensor<16x16xf16, #blocked>
+    %21 = tt.splat %arg2 : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>, #blocked>
+    %22 = tt.addptr %21, %7 : tensor<16x16x!tt.ptr<f16>, #blocked>, tensor<16x16xi32, #blocked>
+    tt.store %22, %20 : tensor<16x16x!tt.ptr<f16>, #blocked>
+    tt.return
+  }
+}
+```
+
+### Shared memory encoding and Swizzling
+
+Pre-definitions:
+
+1. A 2D tensor `A` with the offset address of `A[i,j]` can be calculated as `offset = (i * num_col + j) * byte_per_element`
+2. `triton.shared` attribute with parameters `vec`, `perPhase` and `maxPhase`
+
+Then we can calculate the offset address of elment `A[i,j]` as follow:
+
+```c
+int offset (int i, int j, int num_col, int byte_per_element, int vec, int perPhase, int maxPhase) {
+    int phase_grp = i / perPhase;
+    int phase = phase_grp % maxPhase;
+    int line_grp = j / vec;
+    int phased_line_grp = line_grp ^ perPhase; //xor
+    int phased_j = phased_line_grp * vec
+
+    return (i * num_col + phased_j) * byte_per_element;
+}
+```
+
+The reason of swizzling is to avoid bank conflict, see [this post](https://github.com/triton-lang/triton/discussions/2026)
+
+## PTX
+
+```ptx
+.version 8.4
+.target sm_89
+.address_size 64
+
+	// .globl	matmul_kernel_m16n16k16
+.extern .shared .align 16 .b8 global_smem[];
+
+.visible .entry matmul_kernel_m16n16k16(
+	.param .u64 matmul_kernel_m16n16k16_param_0,
+	.param .u64 matmul_kernel_m16n16k16_param_1,
+	.param .u64 matmul_kernel_m16n16k16_param_2
+)
+.maxntid 128, 1, 1
+{
+	.reg .pred 	%p<4>;
+	.reg .b16 	%rs<3>;
+	.reg .b32 	%r<62>;
+	.reg .f32 	%f<11>;
+	.reg .b64 	%rd<8>;
+$L__func_begin0:
+
+	ld.param.u64 	%rd4, [matmul_kernel_m16n16k16_param_0];
+	ld.param.u64 	%rd5, [matmul_kernel_m16n16k16_param_1];
+$L__tmp0:
+	mov.u32 	%r20, %tid.x;
+	ld.param.u64 	%rd6, [matmul_kernel_m16n16k16_param_2];
+	shl.b32 	%r21, %r20, 1;
+	and.b32  	%r22, %r21, 240;
+	and.b32  	%r23, %r21, 14;
+	and.b32  	%r24, %r21, 254;
+	mul.wide.u32 	%rd7, %r24, 2;
+	add.s64 	%rd1, %rd4, %rd7;
+	add.s64 	%rd2, %rd5, %rd7;
+	mov.pred 	%p1, -1;
+	// begin inline asm
+	mov.u32 %r1, 0x0;
+	@%p1 ld.global.b32 { %r1 }, [ %rd1 + 0 ];
+	// end inline asm
+	shr.u32 	%r25, %r20, 2;
+	and.b32  	%r26, %r25, 8;
+	xor.b32  	%r27, %r23, %r26;
+	or.b32  	%r28, %r27, %r22;
+	shl.b32 	%r29, %r28, 1;
+	mov.u32 	%r30, global_smem;
+	add.s32 	%r31, %r30, %r29;
+	st.shared.u32 	[%r31], %r1;
+	// begin inline asm
+	mov.u32 %r2, 0x0;
+	@%p1 ld.global.b32 { %r2 }, [ %rd2 + 0 ];
+	// end inline asm
+	add.s32 	%r32, %r30, 1024;
+	add.s32 	%r33, %r32, %r29;
+	st.shared.u32 	[%r33], %r2;
+	bar.sync 	0;
+	and.b32  	%r34, %r20, 7;
+	bfe.u32 	%r35, %r20, 3, 2;
+	bfe.u32 	%r36, %r20, 4, 1;
+	bfe.u32 	%r37, %r20, 2, 1;
+	xor.b32  	%r38, %r36, %r37;
+	shl.b32 	%r39, %r38, 4;
+	shl.b32 	%r40, %r20, 5;
+	and.b32  	%r41, %r40, 480;
+	or.b32  	%r42, %r39, %r41;
+	add.s32 	%r7, %r30, %r42;
+	// begin inline asm
+	ldmatrix.sync.aligned.m8n8.x4.shared.b16 { %r13, %r14, %r15, %r16 }, [ %r7 + 0 ];
+	// end inline asm
+	bfe.u32 	%r43, %r20, 5, 1;
+	xor.b32  	%r44, %r43, %r37;
+	shl.b32 	%r45, %r44, 4;
+	or.b32  	%r46, %r45, %r41;
+	add.s32 	%r12, %r32, %r46;
+	// begin inline asm
+	ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 { %r17, %r18, %r10, %r11 }, [ %r12 + 0 ];
+	// end inline asm
+	mov.f32 	%f1, 0f00000000;1
+	mov.f32 	%f2, %f1;
+	mov.f32 	%f3, %f1;
+	mov.f32 	%f4, %f1;
+	// begin inline asm
+	mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 { %f1, %f2, %f3, %f4 }, { %r13, %r14, %r15, %r16 }, { %r17, %r18 }, { %f1, %f2, %f3, %f4 };
+	// end inline asm
+	bar.sync 	0;
+	bfe.u32 	%r47, %r20, 2, 3;
+	and.b32  	%r48, %r21, 6;
+	shl.b32 	%r49, %r43, 3;
+	or.b32  	%r50, %r49, %r48;
+	mad.lo.s32 	%r51, %r47, 18, %r50;
+	shl.b32 	%r52, %r51, 2;
+	add.s32 	%r53, %r30, %r52;
+	st.shared.v2.f32 	[%r53], {%f1, %f2};
+	st.shared.v2.f32 	[%r53+576], {%f3, %f4};
+	bar.sync 	0;
+	shr.u32 	%r54, %r20, 3;
+	and.b32  	%r55, %r54, 12;
+	or.b32  	%r56, %r55, %r35;
+	shl.b32 	%r57, %r34, 1;
+	mad.lo.s32 	%r58, %r56, 18, %r57;
+	shl.b32 	%r59, %r58, 2;
+	add.s32 	%r60, %r30, %r59;
+	ld.shared.v2.f32 	{%f9, %f10}, [%r60];
+	cvt.rn.f16.f32 	%rs1, %f10;
+	cvt.rn.f16.f32 	%rs2, %f9;
+	mov.b32 	%r61, {%rs2, %rs1};
+	add.s64 	%rd3, %rd6, %rd7;
+	// begin inline asm
+	@%p1 st.global.b32 [ %rd3 + 0 ], { %r61 };
+	// end inline asm
+	ret;
+$L__tmp1:
+$L__func_end0:
+}
+```
+
+### Matrix multiplication with nvidia_mma
+
+This is a warp level operation, which means each warp would finish one `mma` instruction, to perform the `mma` operation, we need:
+
+1. Load both matrixs of specific shape to thread's register (Based ont he shape of Matrix, each thread would hold a determined part of elements of the matrix)
+2. perform `mma` and the result will be saved in registers spreaded in each threads
+3. Store the result back
+
+For better illustration, we use `mma.sync.aligned.m16n8k16` as example in the following sections.
+
+### ldmatrix
+
+Official document is [here](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#warp-level-matrix-instructions-ldmatrix).
+
+On warp level, it load 1, 2, or 4 matrix of shape `[8, 8]` with size of element are 2 byte.
+
+#### Example of `ldmatrix.sync.aligned.m8n8.x4.shared.b16 { d0, d1, d2, d3 }, [ s0 + 0 ]`
+
+Donate `%lane.s0` as `%lane`'th thread's `s0` register. same notation applies to `d0`, `d1`, `d2`, `d3`.
+
+The element of memory address `%lane.s0 + 2j` to `%land.s0 + 2j + 1` (2 byte), where `j` is less than 8 and greater or equal to 0 will be loaded to:
+
+```c
+struct {
+    int laneID;
+    int dstIdx;
+    int high; // 0 in the low 16 bit, 1 in the high 16 bit
+} ThreadLoc;
+
+ThreadLoc calcTheadLoc(int srcLaneId, int s0, int j) 
+{
+    ThreadLoc loc;
+    loc.dstIdx = srcLaneId / 8;
+    int row_in_mat = srcLaneId % 8;
+    int col_in_mat = j;
+    // if col_in_mat is odd, then the element will be stored in high 16bit of target register, otherwise low 16 bitxx
+    loc.high = col_in_mat % 2; 
+    // one dst register will store 2 elements (since each elements tooks 2 byte)
+    loc.laneID = row_in_mat * 4 + (col_in_mat / 2);
+
+    return loc;
+}
+```
+
+Illustration:
+
+1. Basically, the `i`'th `[8, 8]` matrix will be stored in destination register `di` of each thread
+2. The part that each register holds are same as the figure in official document:
+   <img src=https://docs.nvidia.com/cuda/parallel-thread-execution/_images/mma-ldmatrix-fragments.png>
+3. The start address of `i`'th matrix's `n`'th row of 8 elements (2 byte) will be stored at the address of `%(i * 8 + j).s0`. Thus the matrix do not be continues in memory. This provide the possibility of [Swizzling](#shared-memory-encoding-and-swizzling)
+
+### mma
+
+A warp would use this instruction to execute matrix multiplication.
+
+We use example of `mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 { d1, d2, d3, d4 }, { a13, a14, a15, a16 }, { b17, b18 }, { d1, d2, d3, d4 };` as example to illustrate the usage of `mma` instruction.
+
+#### matrix A
+
+By definition of the instruction, matrix A has the shape of `[16, 16]` with each element tooks 2 byte
+
+Element of `A[i,j]` will be stored in:
+
+```c
+struct {
+    int laneID;
+    int aIdx;
+    int high; // 0 in the low 16 bit, 1 in the high 16 bit
+} ALoc;
+
+ALoc calcTheadLoc(int i, int j) 
+{
+    ALoc loc;
+    loc.aIdx = i / 8 + j / 8;
+    int row_in_sub_mat = i % 8;
+    int col_in_sub_mat = j % 8;
+    // if col_in_mat is odd, then the element will be stored in high 16bit of target register, otherwise low 16 bitxx
+    loc.high = col_in_sub_mat % 2;
+    // one dst register will store 2 elements (since each elements tooks 2 byte)
+    loc.laneID = row_in_sub_mat * 4 + (col_in_sub_mat) / 2; 
+
+    return loc;
+}
+```
+
+#### matrix B
+
+By definition of the instruction, matrix A has the shape of `[16, 8]` with each element tooks 4 byte
+
+Element of `B[i,j]` will be stored in:
+
+```c
+struct {
+    int laneID;
+    int dIdx;
+} BLoc;
+
+BLoc calcTheadLoc(int i, int j) 
+{
+    BLoc loc;
+
+    return loc;
+}
+```
+
+#### matrix D
+
+By definition of the instruction, matrix A has the shape of `[16, 8]` with each element tooks 4 byte
+
+Element of `D[i,j]` will be stored in:
+
+```c
+struct {
+    int laneID;
+    int dIdx;
+} DLoc;
+
+DLoc calcTheadLoc(int i, int j) 
+{
+    DLoc loc;
+    int sub_mat = i / 8;
+    int row_in_sub_mat = i % 8;
+    int col_in_sub_mat = j;
+    loc.aIdx = sub_mat + j % 2;
+    // two dst registers of same thread will store 2 elements (since each elements tooks 4 byte)
+    loc.laneID = row_in_sub_mat * 4 + (col_in_mat / 2); 
+
+    return loc;
+}
+```
 
 # Appendix
 
