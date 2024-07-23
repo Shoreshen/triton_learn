@@ -4,6 +4,7 @@
 # $?  表示比目标还要新的依赖文件列表
 BRANCH = $(shell git symbolic-ref --short HEAD)
 LLVM_HASH = $(shell cat ./triton-project/cmake/llvm-hash.txt)
+PW = $(shell cat ~/文档/PW)
 TEXT =
 # tools ==================================================================================
 search_text:
@@ -37,6 +38,8 @@ clear_cache:
 	- rm -rf /tmp/torchinductor_shore
 	- rm -rf ./.cache/*
 	- rm -rf ./.tmp/*
+allow_attach:
+	echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope
 
 PHONY += active_venv deactive_venv clear_cache
 # git ====================================================================================

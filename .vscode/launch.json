@@ -21,6 +21,13 @@
             },
         },
         {
+            "name": "Python & cpp: matmul_case_1.py",
+            "type": "pythoncpp",
+            "request": "launch",
+            "pythonLaunchName": "Python: matmul_case_1.py",
+            "cppAttachName": "(gdb) Attach",
+        },
+        {
             "name": "Python: matmul_case_1.py",
             "type": "debugpy",
             "request": "launch",

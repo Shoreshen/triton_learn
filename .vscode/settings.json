@@ -82,6 +82,14 @@
         "hash_set": "cpp",
         "bitset": "cpp",
         "queue": "cpp",
-        "stack": "cpp"
+        "stack": "cpp",
+        "complex": "cpp",
+        "cinttypes": "cpp",
+        "csignal": "cpp",
+        "fstream": "cpp",
+        "iomanip": "cpp",
+        "iostream": "cpp",
+        "istream": "cpp",
+        "sstream": "cpp"
     }
 }

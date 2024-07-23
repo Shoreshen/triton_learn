@@ -1026,7 +1026,7 @@ The detailed position mapping need further investigation.
 Memory layout of matrix `A` and `B` for matrix produce of `D = AB + C`, having the following  parameters:
 
 1. `opIdx`: The index of the operand in the dot operation. (A = 0, B = 1)
-2. `parent`: A [mma layout](#nvidia_mma) attribute. Indicating detailed layout of the memory
+2. `parent`: A [Distributed layout](#distributed) attribute. Indicating detailed layout of the memory
 3. `kWidth`: The number of consecutive elements stored by one thread along k dimension
 
 Note that for Nvidia's [mma](#mma-1) operation for `D = AB + C` all of `A`, `B`, `C` and `D` should would be stored in thread's register across one warp. Thus all of them need [distributed](#distributed) memory layout.
@@ -1317,6 +1317,305 @@ DLoc calcTheadLoc(int i, int j)
 }
 ```
 
+# MLIR
+
+## Conversion between Dialects
+
+Referencing to [toy example](https://mlir.llvm.org/docs/Tutorials/Toy/Ch-5/) from the [official document](#https://mlir.llvm.org/docs/) of MLIR.
+
+The example we used is conversion of `tritonIR` to `tritonGPUIR`, which is pass [ConvertTritonToTritonGPU](triton-project/lib/Conversion/TritonToTritonGPU/TritonToTritonGPUPass.cpp#L746) pass.
+
+It is useful to understand this since almost all of the conversion pass in Triton is similar to this example.
+
+### Components
+
+#### TypeConverter
+
+For our example, defined as follow:
+
+```cpp
+TritonGPUTypeConverter::TritonGPUTypeConverter(MLIRContext *context,
+                                               int numWarps, int threadsPerWarp,
+                                               int numCTAs)
+    : context(context), numWarps(numWarps), threadsPerWarp(threadsPerWarp),
+      numCTAs(numCTAs) {
+  addConversion([](Type type) { return type; });
+
+  // Add encoding for tensor
+  addConversion([this](RankedTensorType tensorType) -> RankedTensorType {
+    // types with encoding are already in the right format
+    // TODO: check for layout encodings more specifically
+    if (tensorType.getEncoding())
+      return tensorType;
+    ArrayRef<int64_t> shape = tensorType.getShape();
+    triton::gpu::BlockedEncodingAttr encoding =
+        getDefaultBlockedEncoding(this->context, shape, this->numWarps,
+                                  this->threadsPerWarp, this->numCTAs);
+    return RankedTensorType::get(shape, tensorType.getElementType(), encoding);
+  });
+
+  // Add encoding for tensor pointer
+  addConversion([this](triton::PointerType ptrType) -> triton::PointerType {
+    // Check whether tensor pointer `tt.ptr<tensor<>>`
+    auto pointeeTensorType =
+        dyn_cast<RankedTensorType>(ptrType.getPointeeType());
+    if (pointeeTensorType == nullptr)
+      return ptrType;
+
+    // Add layout into the tensor
+    auto convertedTensorType = convertType(pointeeTensorType);
+    return triton::PointerType::get(convertedTensorType,
+                                    ptrType.getAddressSpace());
+  });
+
+  //
+  // Materializations
+  //
+  // This will be called when (newArgType != origArgType)
+  // This will create newArg, and map(origArg, newArg)
+  addArgumentMaterialization([&](OpBuilder &builder,
+                                 RankedTensorType tensorType, ValueRange inputs,
+                                 Location loc) -> std::optional<Value> {
+    llvm_unreachable("Argument rematerialization should not happen in Triton "
+                     "-> TritonGPU conversion");
+    return std::nullopt;
+  });
+
+  // If the origValue still has live user(s), use this to
+  // convert origValue to newValue
+  addSourceMaterialization([&](OpBuilder &builder, RankedTensorType tensorType,
+                               ValueRange inputs,
+                               Location loc) -> std::optional<Value> {
+    llvm_unreachable("Source rematerialization should not happen in Triton -> "
+                     "TritonGPU Conversion");
+    return std::nullopt;
+  });
+
+  // This will be called when (desiredType != newOperandType)
+  // where, desiredType = typeConverter->convertType(origType)
+  // NOTE: only for remapped values.
+  addTargetMaterialization([&](OpBuilder &builder, RankedTensorType tensorType,
+                               ValueRange inputs, Location loc) {
+    auto cast =
+        builder.create<triton::gpu::ConvertLayoutOp>(loc, tensorType, inputs);
+    return std::optional<Value>(cast.getResult());
+  });
+}
+```
+
+1. `addConversion([](Type type) { return type; });`: Defaultly return the same type
+2. `addConversion([this](RankedTensorType tensorType) -> RankedTensorType{...}`: Logic to convert `RankedTensorType`, in here it returns the same type but added extra attribute ([memory layout](#block))
+3. `addArgumentMaterialization(...)`: lambda function to handle the case when the argument is not the same type as the original one. Here it indicate that this should not be happennig when converting `tritonIR` to `tritonGPUIR`
+4. `addTargetMaterialization(...)`: lambda function to handle the case when the target is not the same type as the original one
+
+Other functions need to be further investigaged.
+
+#### Target
+
+For our example, defined as follow:
+
+```cpp
+TritonGPUConversionTarget::TritonGPUConversionTarget(
+    MLIRContext &context, TritonGPUTypeConverter &typeConverter)
+    : ConversionTarget(context) {
+  // TODO: we should also verify ops of TritonGPUDialect
+  addLegalDialect<triton::gpu::TritonGPUDialect>();
+
+  // Some ops from SCF are illegal
+  addIllegalOp<scf::ExecuteRegionOp, scf::ParallelOp, scf::ReduceOp,
+               scf::ReduceReturnOp>();
+
+  addDynamicallyLegalDialect<arith::ArithDialect, math::MathDialect,
+                             triton::TritonDialect, cf::ControlFlowDialect,
+                             scf::SCFDialect>([&](Operation *op) {
+    bool hasLegalRegions = true;
+    for (auto &region : op->getRegions()) {
+      hasLegalRegions = hasLegalRegions && typeConverter.isLegal(&region);
+    }
+    if (hasLegalRegions && typeConverter.isLegal(op)) {
+      return true;
+    }
+    return false;
+  });
+
+  // We have requirements for the data layouts
+  addDynamicallyLegalOp<triton::DotOp>([](triton::DotOp dotOp) -> bool {
+    Attribute aEncoding =
+        cast<RankedTensorType>(dotOp.getA().getType()).getEncoding();
+    Attribute bEncoding =
+        cast<RankedTensorType>(dotOp.getB().getType()).getEncoding();
+    if (aEncoding && isa<triton::gpu::DotOperandEncodingAttr>(aEncoding) &&
+        bEncoding && isa<triton::gpu::DotOperandEncodingAttr>(bEncoding))
+      return true;
+    return false;
+  });
+}
+```
+
+1. `addLegalDialect<triton::gpu::TritonGPUDialect>();`: All operations in `triton::gpu::TritonGPUDialect` are legal
+2. `addIllegalOp<...>`: All operations in `<...>` are illegal. Actually it will remove the patterns that applies on legal operations at beginging.
+3. `addDynamicallyLegalDialect<arith::ArithDialect, ...>([&](Operation *op) {...})` for operations from listed dialects in `<arith::ArithDialect, ...>`, used the passed in lambda function to determine if the operation is legal.
+4. `addDynamicallyLegalOp<triton::DotOp>(...)` for `triton::DotOp` operation, used the passed in lambda function to determine if the operation is legal.
+
+#### Pattern
+
+Re-write patterns for conversion. Usually sub-class of [`OpConversionPattern`](llvm-project/mlir/include/mlir/Transforms/DialectConversion.h#L515)
+
+### applyPartialConversion
+
+#### Basic process
+
+By the following to jump calls:
+
+```cpp
+LogicalResult mlir::applyPartialConversion(
+    ArrayRef<Operation *> ops, const ConversionTarget &target,
+    const FrozenRewritePatternSet &patterns, ConversionConfig config) {
+  OperationConverter opConverter(target, patterns, config,
+                                 OpConversionMode::Partial);
+  return opConverter.convertOperations(ops);
+}
+LogicalResult
+mlir::applyPartialConversion(Operation *op, const ConversionTarget &target,
+                             const FrozenRewritePatternSet &patterns,
+                             ConversionConfig config) {
+  return applyPartialConversion(llvm::ArrayRef(op), target, patterns, config);
+}
+```
+
+MLIR will fall into the main logic of applyPartialConversion:
+
+```cpp
+LogicalResult OperationConverter::convertOperations(ArrayRef<Operation *> ops) {
+  if (ops.empty())
+    return success();
+  const ConversionTarget &target = opLegalizer.getTarget();
+
+  // Compute the set of operations and blocks to convert.
+  SmallVector<Operation *> toConvert;
+  for (auto *op : ops) {
+    op->walk<WalkOrder::PreOrder, ForwardDominanceIterator<>>(
+        [&](Operation *op) {
+          toConvert.push_back(op);
+          // Don't check this operation's children for conversion if the
+          // operation is recursively legal.
+          auto legalityInfo = target.isLegal(op);
+          if (legalityInfo && legalityInfo->isRecursivelyLegal)
+            return WalkResult::skip();
+          return WalkResult::advance();
+        });
+  }
+
+  // Convert each operation and discard rewrites on failure.
+  ConversionPatternRewriter rewriter(ops.front()->getContext(), config);
+  ConversionPatternRewriterImpl &rewriterImpl = rewriter.getImpl();
+
+  for (auto *op : toConvert)
+    if (failed(convert(rewriter, op)))
+      return rewriterImpl.undoRewrites(), failure();
+
+  // Now that all of the operations have been converted, finalize the conversion
+  // process to ensure any lingering conversion artifacts are cleaned up and
+  // legalized.
+  if (failed(finalize(rewriter)))
+    return rewriterImpl.undoRewrites(), failure();
+
+  // After a successful conversion, apply rewrites if this is not an analysis
+  // conversion.
+  if (mode == OpConversionMode::Analysis) {
+    rewriterImpl.undoRewrites();
+  } else {
+    rewriterImpl.applyRewrites();
+  }
+  return success();
+}
+```
+
+1. It can be seen that a failure of one pattern will cause the failure of total conversion process and result in undo of all applied conversions:
+   ```cpp
+    // Convert each operation and discard rewrites on failure.
+    ConversionPatternRewriter rewriter(ops.front()->getContext(), config);
+    ConversionPatternRewriterImpl &rewriterImpl = rewriter.getImpl();
+
+    for (auto *op : toConvert)
+        if (failed(convert(rewriter, op)))
+        return rewriterImpl.undoRewrites(), failure();
+   ```
+2. After all the patterns has been applied, there is still check of legality of the whole module
+3. By calling `convert` it will call `opLegalizer.legalize(op, rewriter)`, and for partial convertions, if legalization failed, it will no return error unless the operation is [illegal for the target](#target):
+   ```cpp
+    LogicalResult OperationConverter::convert(ConversionPatternRewriter &rewriter,
+                                            Operation *op) {
+        // Legalize the given operation.
+        if (failed(opLegalizer.legalize(op, rewriter))) {
+            // Handle the case of a failed conversion for each of the different modes.
+            // Full conversions expect all operations to be converted.
+            if (mode == OpConversionMode::Full)
+            return op->emitError()
+                    << "failed to legalize operation '" << op->getName() << "'";
+            // Partial conversions allow conversions to fail iff the operation was not
+            // explicitly marked as illegal. If the user provided a `unlegalizedOps`
+            // set, non-legalizable ops are added to that set.
+            if (mode == OpConversionMode::Partial) {
+            if (opLegalizer.isIllegal(op))
+                return op->emitError()
+                    << "failed to legalize operation '" << op->getName()
+                    << "' that was explicitly marked illegal";
+            if (config.unlegalizedOps)
+                config.unlegalizedOps->insert(op);
+            }
+        }
+        ...
+    }
+   ```
+4. If operation is [legal for the target](#target), than return. Otherwise will call target patterns to lower the operation:
+   ```cpp
+    LogicalResult
+    OperationLegalizer::legalize(Operation *op,
+                                ConversionPatternRewriter &rewriter) {
+        ...
+        // Check if this operation is legal on the target.
+        if (auto legalityInfo = target.isLegal(op)) {
+            LLVM_DEBUG({
+            logSuccess(
+                logger, "operation marked legal by the target{0}",
+                legalityInfo->isRecursivelyLegal
+                    ? "; NOTE: operation is recursively legal; skipping internals"
+                    : "");
+            logger.startLine() << logLineComment;
+            });
+
+            // If this operation is recursively legal, mark its children as ignored so
+            // that we don't consider them for legalization.
+            if (legalityInfo->isRecursivelyLegal) {
+            op->walk([&](Operation *nested) {
+                if (op != nested)
+                rewriter.getImpl().ignoredOps.insert(nested);
+            });
+            }
+
+            return success();
+        }
+
+        ...
+        // Otherwise, we need to apply a legalization pattern to this operation.
+        if (succeeded(legalizeWithPattern(op, rewriter))) {
+            LLVM_DEBUG({
+            logSuccess(logger, "");
+            logger.startLine() << logLineComment;
+            });
+            return success();
+        }
+        ...
+    }
+   ```
+
+#### Properties
+
+1. From the [above section](#basic-process), if a pattern failed, it will continue to apply the rest of other patterns
+2. If [`convert`](llvm-project/mlir/lib/Transforms/Utils/DialectConversion.cpp#L2551) function failed, it will stop and undo all the applied patterns
+3. During the conversion, if a re-writed operations type does not fit it's user, it will create a new operation, and will save the new operand in `OpAdaptor` of user operation. After all conversion has been done, it will clean the un-needed operations by  calling `rewrite->cleanup`. see Appendix for example
+
 # Appendix
 
 ## Definiton of `BackendInstaller` and `Backend` class
@@ -1384,3 +1683,105 @@ class BackendInstaller:
         ]
 ```
 
+## Example for partial conversion not unaligned type
+
+The incoming IR is:
+
+```llvm
+module attributes {"triton_gpu.num-ctas" = 1 : i32, "triton_gpu.num-warps" = 4 : i32, triton_gpu.target = "cuda:89", "triton_gpu.threads-per-warp" = 32 : i32} {
+  tt.func public @matmul_kernel_m16n16k16(%arg0: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg1: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg2: !tt.ptr<f16> {tt.divisibility = 16 : i32}) attributes {noinline = false} {
+    %cst = arith.constant dense<0.000000e+00> : tensor<16x16xf32>
+    %cst_0 = arith.constant dense<16> : tensor<16x1xi32>
+    %0 = tt.make_range {end = 16 : i32, start = 0 : i32} : tensor<16xi32>
+    %1 = tt.expand_dims %0 {axis = 1 : i32} : tensor<16xi32> -> tensor<16x1xi32>
+    %2 = arith.muli %1, %cst_0 : tensor<16x1xi32>
+    %3 = tt.expand_dims %0 {axis = 0 : i32} : tensor<16xi32> -> tensor<1x16xi32>
+    %4 = tt.broadcast %2 : tensor<16x1xi32> -> tensor<16x16xi32>
+    %5 = tt.broadcast %3 : tensor<1x16xi32> -> tensor<16x16xi32>
+    %6 = arith.addi %4, %5 : tensor<16x16xi32>
+    %7 = tt.splat %arg0 : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>>
+    %8 = tt.addptr %7, %6 : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi32>
+    %9 = tt.splat %arg1 : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>>
+    %10 = tt.addptr %9, %6 : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi32>
+    %11 = tt.load %8 : tensor<16x16x!tt.ptr<f16>>
+    %12 = tt.load %10 : tensor<16x16x!tt.ptr<f16>>
+    %13 = tt.dot %11, %12, %cst, inputPrecision = tf32 : tensor<16x16xf16> * tensor<16x16xf16> -> tensor<16x16xf32>
+    %14 = arith.truncf %13 : tensor<16x16xf32> to tensor<16x16xf16>
+    %15 = tt.splat %arg2 : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>>
+    %16 = tt.addptr %15, %6 : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi32>
+    tt.store %16, %14 : tensor<16x16x!tt.ptr<f16>>
+    tt.return
+  }
+}
+```
+
+After applying `ArithConstantPattern`:
+
+```llvm
+module attributes {"triton_gpu.num-ctas" = 1 : i32, "triton_gpu.num-warps" = 4 : i32, triton_gpu.target = "cuda:89", "triton_gpu.threads-per-warp" = 32 : i32} {
+  tt.func public @matmul_kernel_m16n16k16(%arg0: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg1: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg2: !tt.ptr<f16> {tt.divisibility = 16 : i32}) attributes {noinline = false} {
+    ; new operation for cst_0 since tt.dot uses cst_0 and the type does not aligne with conveted one
+    %cst = arith.constant dense<0.000000e+00> : tensor<16x16xf32, #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [2, 16], warpsPerCTA = [4, 1], order = [1, 0]}>>
+    %cst_0 = arith.constant dense<0.000000e+00> : tensor<16x16xf32>
+    %cst_1 = arith.constant dense<16> : tensor<16x1xi32>
+    %0 = tt.make_range {end = 16 : i32, start = 0 : i32} : tensor<16xi32>
+    %1 = tt.expand_dims %0 {axis = 1 : i32} : tensor<16xi32> -> tensor<16x1xi32>
+    %2 = arith.muli %1, %cst_1 : tensor<16x1xi32>
+    %3 = tt.expand_dims %0 {axis = 0 : i32} : tensor<16xi32> -> tensor<1x16xi32>
+    %4 = tt.broadcast %2 : tensor<16x1xi32> -> tensor<16x16xi32>
+    %5 = tt.broadcast %3 : tensor<1x16xi32> -> tensor<16x16xi32>
+    %6 = arith.addi %4, %5 : tensor<16x16xi32>
+    %7 = tt.splat %arg0 : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>>
+    %8 = tt.addptr %7, %6 : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi32>
+    %9 = tt.splat %arg1 : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>>
+    %10 = tt.addptr %9, %6 : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi32>
+    %11 = tt.load %8 : tensor<16x16x!tt.ptr<f16>>
+    %12 = tt.load %10 : tensor<16x16x!tt.ptr<f16>>
+    ; This should be using he new operation cst, but due to the type inconsistency, the new operation is stored in ``
+    %13 = tt.dot %11, %12, %cst_0, inputPrecision = tf32 : tensor<16x16xf16> * tensor<16x16xf16> -> tensor<16x16xf32>
+    %14 = arith.truncf %13 : tensor<16x16xf32> to tensor<16x16xf16>
+    %15 = tt.splat %arg2 : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>>
+    %16 = tt.addptr %15, %6 : tensor<16x16x!tt.ptr<f16>>, tensor<16x16xi32>
+    tt.store %16, %14 : tensor<16x16x!tt.ptr<f16>>
+    tt.return
+  }
+}
+```
+
+After `rewrite->cleanup`:
+
+```llvm
+module attributes {"triton_gpu.num-ctas" = 1 : i32, "triton_gpu.num-warps" = 4 : i32, triton_gpu.target = "cuda:89", "triton_gpu.threads-per-warp" = 32 : i32} {
+  tt.func public @matmul_kernel_m16n16k16(%arg0: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg1: !tt.ptr<f16> {tt.divisibility = 16 : i32}, %arg2: !tt.ptr<f16> {tt.divisibility = 16 : i32}) attributes {noinline = false} {
+    %cst = arith.constant dense<0.000000e+00> : tensor<16x16xf32, #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [2, 16], warpsPerCTA = [4, 1], order = [1, 0]}>>
+    %cst_0 = arith.constant dense<16> : tensor<16x1xi32, #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [32, 1], warpsPerCTA = [4, 1], order = [1, 0]}>>
+    %0 = tt.make_range {end = 16 : i32, start = 0 : i32} : tensor<16xi32, #triton_gpu.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [4], order = [0]}>>
+    %1 = triton_gpu.convert_layout %0 : tensor<16xi32, #triton_gpu.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [4], order = [0]}>> -> tensor<16xi32, #triton_gpu.slice<{dim = 1, parent = #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [32, 1], warpsPerCTA = [4, 1], order = [0, 1]}>}>>
+    %2 = tt.expand_dims %1 {axis = 1 : i32} : tensor<16xi32, #triton_gpu.slice<{dim = 1, parent = #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [32, 1], warpsPerCTA = [4, 1], order = [0, 1]}>}>> -> tensor<16x1xi32, #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [32, 1], warpsPerCTA = [4, 1], order = [0, 1]}>>
+    %3 = triton_gpu.convert_layout %2 : tensor<16x1xi32, #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [32, 1], warpsPerCTA = [4, 1], order = [0, 1]}>> -> tensor<16x1xi32, #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [32, 1], warpsPerCTA = [4, 1], order = [1, 0]}>>
+    %4 = arith.muli %3, %cst_0 : tensor<16x1xi32, #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [32, 1], warpsPerCTA = [4, 1], order = [1, 0]}>>
+    %5 = triton_gpu.convert_layout %0 : tensor<16xi32, #triton_gpu.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [4], order = [0]}>> -> tensor<16xi32, #triton_gpu.slice<{dim = 0, parent = #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 32], warpsPerCTA = [1, 4], order = [0, 1]}>}>>
+    %6 = tt.expand_dims %5 {axis = 0 : i32} : tensor<16xi32, #triton_gpu.slice<{dim = 0, parent = #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 32], warpsPerCTA = [1, 4], order = [0, 1]}>}>> -> tensor<1x16xi32, #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 32], warpsPerCTA = [1, 4], order = [0, 1]}>>
+    %7 = triton_gpu.convert_layout %6 : tensor<1x16xi32, #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 32], warpsPerCTA = [1, 4], order = [0, 1]}>> -> tensor<1x16xi32, #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [2, 16], warpsPerCTA = [4, 1], order = [1, 0]}>>
+    %8 = tt.broadcast %4 : tensor<16x1xi32, #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [32, 1], warpsPerCTA = [4, 1], order = [1, 0]}>> -> tensor<16x16xi32, #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [32, 1], warpsPerCTA = [4, 1], order = [1, 0]}>>
+    %9 = triton_gpu.convert_layout %8 : tensor<16x16xi32, #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [32, 1], warpsPerCTA = [4, 1], order = [1, 0]}>> -> tensor<16x16xi32, #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [2, 16], warpsPerCTA = [4, 1], order = [1, 0]}>>
+    %10 = tt.broadcast %7 : tensor<1x16xi32, #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [2, 16], warpsPerCTA = [4, 1], order = [1, 0]}>> -> tensor<16x16xi32, #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [2, 16], warpsPerCTA = [4, 1], order = [1, 0]}>>
+    %11 = arith.addi %9, %10 : tensor<16x16xi32, #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [2, 16], warpsPerCTA = [4, 1], order = [1, 0]}>>
+    %12 = tt.splat %arg0 : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>, #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [2, 16], warpsPerCTA = [4, 1], order = [1, 0]}>>
+    %13 = tt.addptr %12, %11 : tensor<16x16x!tt.ptr<f16>, #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [2, 16], warpsPerCTA = [4, 1], order = [1, 0]}>>, tensor<16x16xi32, #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [2, 16], warpsPerCTA = [4, 1], order = [1, 0]}>>
+    %14 = tt.splat %arg1 : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>, #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [2, 16], warpsPerCTA = [4, 1], order = [1, 0]}>>
+    %15 = tt.addptr %14, %11 : tensor<16x16x!tt.ptr<f16>, #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [2, 16], warpsPerCTA = [4, 1], order = [1, 0]}>>, tensor<16x16xi32, #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [2, 16], warpsPerCTA = [4, 1], order = [1, 0]}>>
+    %16 = tt.load %13 : tensor<16x16x!tt.ptr<f16>, #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [2, 16], warpsPerCTA = [4, 1], order = [1, 0]}>>
+    %17 = tt.load %15 : tensor<16x16x!tt.ptr<f16>, #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [2, 16], warpsPerCTA = [4, 1], order = [1, 0]}>>
+    %18 = triton_gpu.convert_layout %16 : tensor<16x16xf16, #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [2, 16], warpsPerCTA = [4, 1], order = [1, 0]}>> -> tensor<16x16xf16, #triton_gpu.dot_op<{opIdx = 0, parent = #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [2, 16], warpsPerCTA = [4, 1], order = [1, 0]}>}>>
+    %19 = triton_gpu.convert_layout %17 : tensor<16x16xf16, #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [2, 16], warpsPerCTA = [4, 1], order = [1, 0]}>> -> tensor<16x16xf16, #triton_gpu.dot_op<{opIdx = 1, parent = #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [2, 16], warpsPerCTA = [4, 1], order = [1, 0]}>}>>
+    %20 = triton_gpu.convert_layout %cst : tensor<16x16xf32, #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [2, 16], warpsPerCTA = [4, 1], order = [1, 0]}>> -> tensor<16x16xf32, #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [2, 16], warpsPerCTA = [4, 1], order = [1, 0]}>>
+    %21 = tt.dot %18, %19, %20, inputPrecision = tf32 : tensor<16x16xf16, #triton_gpu.dot_op<{opIdx = 0, parent = #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [2, 16], warpsPerCTA = [4, 1], order = [1, 0]}>}>> * tensor<16x16xf16, #triton_gpu.dot_op<{opIdx = 1, parent = #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [2, 16], warpsPerCTA = [4, 1], order = [1, 0]}>}>> -> tensor<16x16xf32, #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [2, 16], warpsPerCTA = [4, 1], order = [1, 0]}>>
+    %22 = arith.truncf %21 : tensor<16x16xf32, #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [2, 16], warpsPerCTA = [4, 1], order = [1, 0]}>> to tensor<16x16xf16, #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [2, 16], warpsPerCTA = [4, 1], order = [1, 0]}>>
+    %23 = tt.splat %arg2 : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>, #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [2, 16], warpsPerCTA = [4, 1], order = [1, 0]}>>
+    %24 = tt.addptr %23, %11 : tensor<16x16x!tt.ptr<f16>, #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [2, 16], warpsPerCTA = [4, 1], order = [1, 0]}>>, tensor<16x16xi32, #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [2, 16], warpsPerCTA = [4, 1], order = [1, 0]}>>
+    tt.store %24, %22 : tensor<16x16x!tt.ptr<f16>, #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [2, 16], warpsPerCTA = [4, 1], order = [1, 0]}>>
+    tt.return
+  }
+}
+```
