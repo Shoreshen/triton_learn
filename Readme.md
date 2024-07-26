@@ -49,8 +49,8 @@ Build LLVM withDebug Symbols：
    ```
 2. Install dependencies：
    ```bash
-   pip install ninja cmake wheel
-   pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/121
+   pip install ninja cmake wheel setuptools
+   pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu124
    ```
     1. Note have to install pre version of `pytorch` release version only support `triton-2.3.0`
 3. Deleted installed `triton`：
