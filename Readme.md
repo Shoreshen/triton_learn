@@ -1616,6 +1616,13 @@ LogicalResult OperationConverter::convertOperations(ArrayRef<Operation *> ops) {
 2. If [`convert`](llvm-project/mlir/lib/Transforms/Utils/DialectConversion.cpp#L2551) function failed, it will stop and undo all the applied patterns
 3. During the conversion, if a re-writed operations type does not fit it's user, it will create a new operation, and will save the new operand in `OpAdaptor` of user operation. After all conversion has been done, it will clean the un-needed operations by  calling `rewrite->cleanup`. see Appendix for example
 
+## CallGraph
+
+Defined [here](triton-project/include/triton/Analysis/Utility.h#L227) and build up 2 structures:
+
+1. `graph`: is a map that key is `FuncOp` and value is a pair of `callOp` within the key and target `FuncOp` of the call
+2. `roots`: those `FuncOp` that are not called by any other `FuncOp`
+
 # Appendix
 
 ## Definiton of `BackendInstaller` and `Backend` class
