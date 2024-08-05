@@ -917,7 +917,10 @@ Distributed memory layout of tensor with the following parameters:
 1. `sizePerThread`: The size of tensor owned by a thread
 2. `threadPerWarp`: Number of `sizePerThread` owned by a warp
 3. `warpsPerCTA`: Number of `threadPerWarp` owned by a CTA
-4. `CTAsPerCGA` & `CTASplitNum`: Not going to discussed here
+4. `CTAsPerCGA`: number of `CTA`s in a `CTA` group
+5. `CTASplitNum`: `CTASplitNum[d]` means dimension `d` will be splite to `CTASplitNum[d]` `CTA`s.
+
+Note: `CTAsPerCGA` and `CTASplitNum` are newly imported feature, defaultly not used and will remian `CTAsPerCGA = 1` for the program and `CTASplitNum` as $1^{rand}$ for each tensor
 
 For a 2D tensor `A` with the offset address of `A[i,j]` can be calculated as `offset = (i * num_col + j) * byte_per_element` the thread that owns `A[i,j]` can be calculated as follow:
 

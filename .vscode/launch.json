@@ -35,6 +35,13 @@
             "cppAttachName": "(gdb) Attach",
         },
         {
+            "name": "Python & cpp: 03-matrix-multiplication",
+            "type": "pythoncpp",
+            "request": "launch",
+            "pythonLaunchName": "Python: 03-matrix-multiplication",
+            "cppAttachName": "(gdb) Attach",
+        },
+        {
             "name": "Python: matmul_case_1.py",
             "type": "debugpy",
             "request": "launch",
