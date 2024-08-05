@@ -931,7 +931,7 @@ struct {
     int threadNum;
 } threadLoc;
 
-threadLoc calcLaneID(int i, int j, int sizePerThread[2], int threadPerWarp[2], int warpsPerCTA[2]) {
+threadLoc calcThreadLoc(int i, int j, int sizePerThread[2], int threadPerWarp[2], int warpsPerCTA[2]) {
     threadLoc loc;
     int sizePerWarp[2], sizePerCTA[2];
     
@@ -965,7 +965,7 @@ struct {
     int threadNum;
 } threadLoc;
 
-threadLoc calcLaneID(int i, int j, int sizePerThread[n], int threadPerWarp[n], int warpsPerCTA[n]) {
+threadLoc calcThreadLoc(int i, int j, int sizePerThread[n], int threadPerWarp[n], int warpsPerCTA[n]) {
     threadLoc loc;
     int sizePerWarp[n], sizePerCTA[n], CTA[n], warp[n], lane[n];
     
@@ -1024,6 +1024,54 @@ The detailed position mapping need further investigation.
 
 ##### Slice
 
+Only figured out the 1D tensor and 2D layout case. For a tensor `A[n]` with a parent [distributed layout](#distributed) for tensor shape `B[p,q]` Assume that for element `B[u,v]` we have function `threadLoc calcParentThreadLoc(int u, int v);` to calculate the thread that owns `B[u,v]`. Then the thread that owns `A[i]` can be calculated as follow:
+
+```cpp
+struct {
+    int CTAnum;
+    int warpNum;
+    int threadNum;
+} threadLoc;
+
+threadLoc calcParentThreadLoc(int u, int v);
+
+std::vector<threadLoc> calcThreadLoc(int dim, int i)
+{
+    std::vector<threadLoc> locations;
+    if (dim == 0) {
+        
+        if (i >= q) {
+            // i must be multiple of q
+            i = i % q;
+        } else {
+            // q must be multiple of i
+            i = q % i;
+        }
+        for (int j = 0; j < p; j++) {
+            threadLoc loc = calcParentThreadLoc(j, i);
+            locations.push_back(loc);
+        }
+    } else if (dim == 1) {
+        if (i >= p) {
+            // i must be multiple of p
+            i = i % p;
+        } else {
+            // p must be multiple of i
+            i = p % i;
+        }
+        for (int j = 0; j < q; j++) {
+            threadLoc loc = calcParentThreadLoc(i % p, j);
+            locations.push_back(loc);
+        }
+    } else {
+        // error
+        exit(1);
+    }
+    return locations;
+}
+```
+
+
 ##### DotOperand
 
 Memory layout of matrix `A` and `B` for matrix produce of `D = AB + C`, having the following  parameters:
@@ -1036,7 +1084,7 @@ Note that for Nvidia's [mma](#mma-1) operation for `D = AB + C` all of `A`, `B`,
 
 This is the reason of adding [mma](#nvidia_mma) layout.
 
-#### Shared 
+#### Shared
 
 Meaning memory that can be accessed by all threads in CTA (or block). One of the example would be shared memory in CUDA.
 
