@@ -1372,7 +1372,7 @@ DLoc calcTheadLoc(int i, int j)
 
 ## Conversion between Dialects
 
-Referencing to [toy example](https://mlir.llvm.org/docs/Tutorials/Toy/Ch-5/) from the [official document](#https://mlir.llvm.org/docs/) of MLIR.
+Referencing to [toy example](https://mlir.llvm.org/docs/Tutorials/Toy/Ch-5/) from the [official document](https://mlir.llvm.org/docs/) of MLIR.
 
 The example we used is conversion of `tritonIR` to `tritonGPUIR`, which is pass [ConvertTritonToTritonGPU](triton-project/lib/Conversion/TritonToTritonGPU/TritonToTritonGPUPass.cpp#L746) pass.
 
