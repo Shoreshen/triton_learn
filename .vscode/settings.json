@@ -93,6 +93,7 @@
         "sstream": "cpp",
         "any": "cpp",
         "source_location": "cpp",
-        "typeindex": "cpp"
+        "typeindex": "cpp",
+        "expected": "cpp"
     }
 }

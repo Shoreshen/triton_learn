@@ -39,7 +39,7 @@ clear_cache:
 	- rm -rf ./.cache/*
 	- rm -rf ./.tmp/*
 allow_attach:
-	echo $(PW) | sudo -S echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope
+	echo $(PW) | sudo -S sh -c 'echo 0 | tee /proc/sys/kernel/yama/ptrace_scope'
 
 PHONY += active_venv deactive_venv clear_cache
 # git ====================================================================================

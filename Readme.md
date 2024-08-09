@@ -165,6 +165,13 @@ if __name__ == '__main__':
 6. Set breakpoint at the target cpp file and continue `Python: triton_compile_test.py`, if it hit the breakpoint, GDB will stop at the target cpp file
     <img src=./pic/img2.png>
 
+## TRITON_INTERPRET
+
+To debug `triton` with `TRITON_INTERPRET`, setting environment variable `TRITON_INTERPRET` to `1`.
+
+This is used to debug triton kernel function. It compile the kernel into CPU runnable code so that users can debug it using CPU debugger (PDB, GDB, etc).
+
+The detailed steps listed in the [official document](https://triton-lang.org/main/programming-guide/chapter-3/debugging.html#using-the-interpreter).
 
 # Triton Source Code
 
@@ -920,7 +927,7 @@ Distributed memory layout of tensor with the following parameters:
 4. `CTAsPerCGA`: number of `CTA`s in a `CTA` group
 5. `CTASplitNum`: `CTASplitNum[d]` means dimension `d` will be splite to `CTASplitNum[d]` `CTA`s.
 
-Note: `CTAsPerCGA` and `CTASplitNum` are newly imported feature, defaultly not used and will remian `CTAsPerCGA = 1` for the program and `CTASplitNum` as $1^{rand}$ for each tensor
+Note: `CTAsPerCGA` and `CTASplitNum` are newly imported feature, defaultly not used and will remian `CTAsPerCGA = 1` for the program and `CTASplitNum` as $1^{rank}$ for each tensor. Detailed are illustrated [here](triton-project/include/triton/Dialect/TritonGPU/IR/TritonGPUAttrDefs.td#L679)
 
 For a 2D tensor `A` with the offset address of `A[i,j]` can be calculated as `offset = (i * num_col + j) * byte_per_element` the thread that owns `A[i,j]` can be calculated as follow:
 
@@ -1112,6 +1119,317 @@ int offset (int i, int j, int num_col, int byte_per_element, int vec, int perPha
 The reason of swizzling is to avoid bank conflict, see [this post](https://github.com/triton-lang/triton/discussions/2026).
 
 For Nvidia device, the `vec` should be 8, since [`ldmatrix`](#ldmatrix) instruction can switch rows of 8 element of f16 by adjusting `%lane.s0` register.
+
+### Coallesce Pass
+
+The major process of coalease pass is to:
+
+1. Calculate [AxisInfo](#axisinfo) for each operation (using [analysis framwork](#analysis-framewrok) to compute recursively)
+2. For load/store related operation, re-calculate a [desired layout](#desired-layout) for the operation based on its pointer or pointer tensor
+3. Insert layout conversion operation before and after the load/store related operation
+
+#### Desired layout
+
+The desired layout is a type of [block layout](#block), the calculation logic is as follow:
+
+1. Getting [AxisInfo](#axisinfo) of pointers of the load/store operation
+2. The `order` of tensor is sorted by `contiguity` in descending order
+3. Search all other load/store related operation that its pointers has the same shape and order
+4. For the dimension that has the maximum `contiguity`, calculate `perThread` by following logic:
+   1. denote for the target dimension:
+      1. congituity as $C$
+      2. divisibility as $D$
+      3. CTA shape as $S$ (note this is calculated with `CTASplitNum`, and [by default](#block) the CTA shape is the same as the tensor shape)
+      4. Bit length of element as $b$
+      5. Total number of elements in the tensor as $N$
+      6. Total number of threads in a CTA as $T$
+   2. Thus the calculated `perThread` is as $\min(\max(D\dim(b\div8),1),C,S,N\div T)$
+5. Find all load/store related operations that:
+   1. has a data dependency connect (meaning connected in a data dependency graph)
+   2. has the same shape and order
+   and calculate the `perThread` for them, pick the minimum value as the `perThread` for all of them
+6. Create the desired [block layout](#block) with the same `numWarps`, `threadsPerWarp`, `CTALayout`, but using the new `order` and calculated `perThread` for `sizePerThread[order[0]]`
+
+This basically means each thread should own more continues element.
+
+#### AxisInfo
+
+AxisInfo containing the following informations:
+
+1. `contiguity`: The contiguity of the tensor along the axis, for a tensor `T` it can be calculated as follow:
+    ```cpp
+    int greatest_common_divisor(int a, int b);
+    int calc_vec_contiguity(Tensor vec)
+    {
+        assert(vec.rank() == 1);
+        // for any a is integer, greatest_common_divisor(a, 0) = a
+        int vec_contiguity = 0;
+        int curr_contiguity = 0;
+        int step;
+        if (is_ptr_type(vec[0]) ) {
+            step = sizeof(vec[0]);
+        } else {
+            step = 1;
+        }
+        for (int i = 1; i < vec.dim(0); i++) {
+            if (vec[i] - vec[i - 1] == step) {
+                curr_contiguity++;
+            } else {
+                vec_contiguity = greatest_common_divisor(vec_contiguity, curr_contiguity);
+                curr_contiguity = 0;
+            }
+        }
+        return vec_contiguity;
+    }
+    int calc_dim_contiguity(Tensor T, int d)
+    {
+        int dim_contiguity = 0;
+        for (auto dim : T.get_all_element_dim()) {
+            if (dim[d] == 0) {
+                dim_start = dim;
+                dim_end = dim;
+                dim_end[d] += T.dim(d); 
+                int vec_contiguity = calc_vec_contiguity(T.get_sub_tensor(dim_start, dim_end))
+                dim_contiguity = greatest_common_divisor(dim_contiguity, vec_contiguity);
+            }
+        }
+        return dim_contiguity;
+    }
+    std::vector calc_contiguity(Tensor T) {
+        std::vector contiguity;
+        for (int d = 0; i < T.rank(); d++) {
+            contiguity.push_back(calc_dim_contiguity(T, d));
+        }
+        return contiguity;
+    }
+    ```
+2. `divisibility`: largest power of 2 that can divid first element along dimension d grouped by `contiguity[d]`, for a tensor `T` it can be calculated as follow:
+    ```cpp
+    int highest_pow_of_2_divisor(int a);
+    int greatest_common_divisor(int a, int b);
+    int calc_vec_divisibility(Tensor T, Tensor vec, int contiguity)
+    {
+        assert(vec.rank() == 1);
+        int vec_divisibility = 0;
+        for (int i = 0; i < vec.dim(0); i += contiguity) {
+            int curr_divisibility = highest_pow_of_2_divisor((vec[i]) / sizeof(vec[0]));
+            vec_divisibility = greatest_common_divisor(vec_divisibility, curr_divisibility);
+        }
+        return vec_divisibility;
+    }
+    int calc_dim_divisibility(Tensor T, int d, int contiguity)
+    {
+        int dim_divisibility = 0;
+        for (auto dim : T.get_all_element_dim()) {
+            if (dim[d] == 0) {
+                dim_start = dim;
+                dim_end = dim;
+                dim_end[d] += T.dim(d); 
+                int vec_divisibility = calc_vec_divisibility(T, T.get_sub_tensor(dim_start, dim_end), contiguity)
+                dim_divisibility = greatest_common_divisor(dim_divisibility, vec_divisibility);
+            }
+        }
+        return dim_divisibility;
+    }
+    std::vector calc_divisibility(Tensor T, std::vector contiguity) 
+    {
+        std::vector divisibility;
+        for (int d = 0; i < T.rank(); d++) {
+            divisibility.push_back(calc_dim_divisibility(T, d, contiguity[d]));
+        }
+        return divisibility;
+    }
+    ```
+3. `constancy`: The length of the shortest sequence of repeating element along the axis, for a tensor `T` it can be calculated as follow:
+    ```cpp
+    int greatest_common_divisor(int a, int b);
+    int calc_vec_constancy(Tensor vec)
+    {
+        assert(vec.rank() == 1);
+        int vec_constancy = 0;
+        int curr_constancy = 0;
+        for (int i = 1; i < vec.dim(0); i++) {
+            if (vec[i] == vec[i - 1]) {
+                vec_constancy++;
+            } else {
+                vec_constancy = greatest_common_divisor(vec_constancy, curr_constancy);
+                curr_constancy = 0;
+            }
+        }
+        return vec_constancy;
+    }
+    int calc_dim_constancy(Tensor T, int d)
+    {
+        int dim_constancy = 0;
+        for (auto dim : T.get_all_element_dim()) {
+            if (dim[d] == 0) {
+                dim_start = dim;
+                dim_end = dim;
+                dim_end[d] += T.dim(d); 
+                int vec_constancy = calc_vec_constancy(T.get_sub_tensor(dim_start, dim_end))
+                dim_constancy = greatest_common_divisor(dim_constancy, vec_constancy);
+            }
+        }
+        return dim_constancy;
+    }
+    std::vector calc_constancy(Tensor T) {
+        std::vector constancy;
+        for (int d = 0; i < T.rank(); d++) {
+            constancy.push_back(calc_dim_constancy(T, d));
+        }
+        return constancy;
+    }
+    ```
+4. `constant_value`: If is a tensor that all element is the same constant, or a signle constant. Otherwise, it is `None`
+
+##### Example of calculating AxisInfo
+
+The following is an example of calculating [AxisInfo](#axisinfo):
+
+```llvm
+;contiguity = [1, 1], divisibility = [16, 16], constancy = [16, 1], constant_value = 16
+%cst_0 = arith.constant dense<16> : tensor<16x1xi32, #blocked1>
+```
+
+This is a matrix of $\left[\begin{matrix}16\\16\\...\\16\end{matrix}\right]_{16\times 1}$, thus:
+
+1. `contiguity = [1, 1]` since for any `i` we have `%cst_0[i+1][0] - %cst_0[i][0] = 0`
+2. `divisibility = [16, 16]` in both dimension is `16` since for any `i` we have `%cst_0[i][0] / 16 = 0`
+3. `constancy = [16, 1]` in the first dimension is `16` since for any `i` we have `%cst_0[i+1] == %cst_0[i]`. In the second dimension is `1` since the dimension length is `1`
+
+```llvm
+;contiguity = [16], divisibility = [1073741824], constancy = [1], constant_value = <none>
+%0 = tt.make_range {end = 16 : i32, start = 0 : i32} : tensor<16xi32, #blocked2>
+```
+
+This is a vector of $(0,1,...,15)$, thus:
+
+1. `contiguity = [16]` since for any `i` we have `%0[i+1] - %0[i] = 1`
+2. `divisibility = [1073741824]`, the largest number. Because the only first element along dimension d grouped by `contiguity[d]` is `%0[0] = 0` can be divided by any power of `2`
+3. `constancy = [1]` in the dimension is `1` since for any `i` we have `%0[i+1] != %0[i]`
+
+```llvm
+;contiguity = [16], divisibility = [1073741824], constancy = [1], constant_value = <none>
+%1 = triton_gpu.convert_layout %0 : tensor<16xi32, #blocked2> -> tensor<16xi32, #triton_gpu.slice<{dim = 1, parent = #blocked3}>>
+```
+
+The above instruction only convert the layout of `%0`. Since it is [distributed](#distributed) layout, the `contiguity`, `divisibility` and `constancy` will remain the same (no [swizzling](#swizzling)).
+
+```llvm
+;contiguity = [16, 1], divisibility = [1073741824, 1], constancy = [1, 1], constant_value = <none>
+%2 = tt.expand_dims %1 {axis = 1 : i32} : tensor<16xi32, #triton_gpu.slice<{dim = 1, parent = #blocked3}>> -> tensor<16x1xi32, #blocked3>
+```
+
+The above instruction expand the dimension of `%1` results a matrix of $\left[\begin{matrix}0\\1\\...\\15\end{matrix}\right]_{16\times 1}$, thus:
+
+1. The `contiguity`, `divisibility` and `constancy` remain the same for the first dimention
+2. Since the second dimension is `1`:
+   1. the `contiguity` and `constancy` are all `1`
+   2. the `divisibility` is `1` since `%2[1,1] = 1`
+3. In summary `contiguity = [16, 1]`, `divisibility = [1073741824, 1]`, `constancy = [1, 1]`
+
+```llvm
+;contiguity = [16, 1], divisibility = [1073741824, 1], constancy = [1, 1], constant_value = <none>
+%3 = triton_gpu.convert_layout %2 : tensor<16x1xi32, #blocked3> -> tensor<16x1xi32, #blocked1>
+```
+
+Same logic as `%1`
+
+```llvm
+;contiguity = [1, 1], divisibility = [16, 16], constancy = [1, 1], constant_value = <none>
+%4 = arith.muli %3, %cst_0 : tensor<16x1xi32, #blocked1>
+```
+
+Basically results a matrix of $\left[\begin{matrix}0\\16\\...\\240\end{matrix}\right]_{16\times 1}$, thus:
+
+1. `contiguity = [1,1]` since for any `i` we have `%4[i+1][0] - %0[i][0] = 16` and there the second dimension length is `1`
+2. `divisibility = [16, 16]`, every element can be divided by `16`
+3. `constancy = [1, 1]` in the dimension is `1` since for any `i` we have `%4[i+1][0] != %0[i][0]` and the second dimension length is `1`
+
+```llvm
+;contiguity = [16], divisibility = [1073741824], constancy = [1], constant_value = <none>
+%5 = triton_gpu.convert_layout %0 : tensor<16xi32, #blocked2> -> tensor<16xi32, #triton_gpu.slice<{dim = 0, parent = #blocked4}>>
+```
+
+Same logic as `%1`
+
+```llvm
+;contiguity = [1, 16], divisibility = [1, 1073741824], constancy = [1, 1], constant_value = <none>
+%6 = tt.expand_dims %5 {axis = 0 : i32} : tensor<16xi32, #triton_gpu.slice<{dim = 0, parent = #blocked4}>> -> tensor<1x16xi32, #blocked4>
+```
+
+Same logic as `%2`
+
+```llvm
+;contiguity = [1, 16], divisibility = [1, 1073741824], constancy = [1, 1], constant_value = <none
+%7 = triton_gpu.convert_layout %6 : tensor<1x16xi32, #blocked4> -> tensor<1x16xi32, #blocked>
+```
+
+Same logic as `%1`
+
+```llvm
+;contiguity = [1, 1], divisibility = [16, 16], constancy = [1, 16], constant_value = <none>
+%8 = tt.broadcast %4 : tensor<16x1xi32, #blocked1> -> tensor<16x16xi32, #blocked1>
+```
+
+Basically made a matrix as $\left[\begin{matrix}0&0&...&0\\16&16&...&16\\...&...&...&...\\240&240&...&240\end{matrix}\right]_{16\times 16}$ thus:
+
+1. `contiguity = [1, 1]` since for any `i` and `j` we have `%8[i+1][j] - %8[i][j] = 16` and `%8[i][j+1] - %8[i][j] = 16` 
+2. `divisibility = [16, 16]` since every element can be divided by `16`
+3. `constancy = [1, 16]` since along dimension `1` all element are the same, but dimension `0` all are different
+
+```llvm
+;contiguity = [1, 1], divisibility = [16, 16], constancy = [1, 16], constant_value = <none>
+%9 = triton_gpu.convert_layout %8 : tensor<16x16xi32, #blocked1> -> tensor<16x16xi32, #blocked>
+```
+
+Same logic as `%1`
+
+```llvm
+;contiguity = [1, 16], divisibility = [1, 1073741824], constancy = [16, 1], constant_value = <none>
+%10 = tt.broadcast %7 : tensor<1x16xi32, #blocked> -> tensor<16x16xi32, #blocked>
+```
+
+Basically made a matrix as $\left[\begin{matrix}0&1&...&15\\0&1&...&15\\...&...&...&...\\0&1&...&15\end{matrix}\right]_{16\times 16}$ thus:
+
+1. `contiguity = [1, 16]` since for any `i` and `j` we have `%10[i+1][j] - %10[i][j] = 0` and `%10[i][j+1] - %10[i][j] = 1` 
+2. `divisibility = [1, 1073741824]` since `%10[1][0] = 1` and for all `i` we have `%10[i][0] = 0` 
+3. `constancy = [16, 1]` since along dimension `0` all element are the same, but dimension `1` all are different
+
+```llvm
+;contiguity = [1, 16], divisibility = [1, 16], constancy = [1, 1], constant_value = <none>
+%11 = arith.addi %9, %10 : tensor<16x16xi32, #blocked>
+```
+
+Basically made a matrix as $\left[\begin{matrix}0&1&...&15\\16&17&...&31\\...&...&...&...\\240&241&...&255\end{matrix}\right]_{16\times 16}$ thus:
+
+1. `contiguity = [1, 16]` since for any `i` and `j` we have `%10[i+1][j] - %10[i][j] = 0` and `%10[i][j+1] - %10[i][j] = 1` 
+2. `divisibility = [1, 16]` since `%10[1][0] = 1` and for all `i` we have `%10[i][0] = 16 * i` 
+3. `constancy = [1, 1]` since along dimension `0` all element are the same, but dimension `1` all are different
+
+```llvm
+;contiguity = [1, 1], divisibility = [16, 16], constancy = [16, 16], constant_value = <none>
+%12 = tt.splat %arg0 : !tt.ptr<f16> -> tensor<16x16x!tt.ptr<f16>, #blocked>
+```
+
+This is a matrix of $\left[\begin{matrix}\text{\%arg0}&\text{\%arg0}&...&\text{\%arg0}\\\text{\%arg0}&\text{\%arg0}&...&\text{\%arg0}\\...&...&...&...\\\text{\%arg0}&\text{\%arg0}&...&\text{\%arg0}\end{matrix}\right]_{16\times 16}$, thus:
+
+1. `contiguity = [1, 1]` 
+2. `divisibility = [16, 16]` since triton assume all pointer is aligned to 16 bytes
+3. `constancy = [16, 16]` since all element are the same
+
+```llvm
+;contiguity = [1, 16], divisibility = [2, 16], constancy = [1, 1], constant_value = <none>
+%13 = tt.addptr %12, %11 : tensor<16x16x!tt.ptr<f16>, #blocked>, tensor<16x16xi32, #blocked>
+```
+
+Basically made a matrix as $\left[\begin{matrix}\text{\%arg0}+0\text{sizeof(type)}&\text{\%arg0}+1\text{sizeof(type)}&...&\text{\%arg0}+15\text{sizeof(type)}\\\text{\%arg0}+16\text{sizeof(type)}&\text{\%arg0}+17\text{sizeof(type)}&...&\text{\%arg0}+31\text{sizeof(type)}\\...&...&...&...\\\text{\%arg0}+240\text{sizeof(type)}&\text{\%arg0}+241\text{sizeof(type)}&...&\text{\%arg0}+255\text{sizeof(type)}\end{matrix}\right]_{16\times 16}$ thus:
+
+1. `contiguity = [1, 16]`: Since the type of element is pointer, it is continues if `%13[i][j+1] - %13[i][j] = sizeof(element)`. Thus contiguity is `16` along dimension `1`
+2. `divisibility = [2, 16]`: 
+   1. Since the type of element is pointer, it is continues if `%13[i][j]` is aligned to `sizeof(element)`. Thus divisibility is `2` along dimension `0`
+   2. Along dimension `1`, all the first elements of countinued group can be expressed as `%arg0 + 2 * 16 * i` while `%arg0` can be divided by `16` and `2 * 16 * i` can be divided by `32`. Thus on conservitive side, the common divisibility is `16`
+3. `constancy = [1, 1]`: Since all element are different
 
 ## PTX
 
@@ -1673,6 +1991,186 @@ Defined [here](triton-project/include/triton/Analysis/Utility.h#L227) and build 
 
 1. `graph`: is a map that key is `FuncOp` and value is a pair of `callOp` within the key and target `FuncOp` of the call
 2. `roots`: those `FuncOp` that are not called by any other `FuncOp`
+
+## Analysis framewrok
+
+Main use is:
+
+1. To provide a framework that propagate the information through operations
+2. The framework will iterate once one of any change to a [`ProgramPoint`](#programpoint) are marked to propagate, then all ot its dependencies will recursively update, untill reach a fixed point (no furhter change will propgate)
+
+The basic process to use analysis framework is:
+
+1. Prepare the [`Analysis`](#analysis) and [`State`](#state) that need to be implemented
+2. Getting the [`DataFlowSolver`](#data-flow-solver) instance by calling `createDataFlowSolver()`
+3. Add [analysis](#analysis) to the solver by calling `solver->load<name/of/analysis/instance>()`
+4. For each top operation (opertations that has no information about user of it), run analysis by calling `DataFlowSolver::initializeAndRun(topOperation)`
+5. After [`DataFlowSolver`](#data-flow-solver) finishs, look up the state of any `Value`, `Operation*` or `Block*` by calling `solver.lookupState<name/of/state/instance>(Value/Operation*/Block*)`
+
+### Concepts and Classes
+
+#### `ProgramPoint`
+
+Union of `Operation*`, `Value` and `Block*`:
+
+1. Can use `point.get<Operation*>()` to get the `Operation*` pointer, and similar for `Value` and `Block*`
+2. Can use `llvm::dyn_cast_if_present<Operation *>(point)` to check if the `point` is `Operation*`, if it is then return the Operation pointer, otherwise return `nullptr`. same for `Value` and `Block*`
+
+#### Data Flow solver
+
+[Data Flow solver](llvm-project/mlir/include/mlir/Analysis/DataFlowFramework.h#L222) is the main structre of doing analysis.
+
+To use data flow solver:
+
+1. Call `createDataFlowSolver()` to get the instance
+2. Add [analysis](#analysis) to the solver by calling `solver->load<name/of/analysis/instance>()`
+
+The major work flow of the solver is the following function:
+
+```cpp
+LogicalResult DataFlowSolver::initializeAndRun(Operation *top) {
+  // Initialize the analyses.
+  for (DataFlowAnalysis &analysis : llvm::make_pointee_range(childAnalyses)) {
+    DATAFLOW_DEBUG(llvm::dbgs()
+                   << "Priming analysis: " << analysis.debugName << "\n");
+    if (failed(analysis.initialize(top)))
+      return failure();
+  }
+
+  // Run the analysis until fixpoint.
+  do {
+    // Exhaust the worklist.
+    while (!worklist.empty()) {
+      auto [point, analysis] = worklist.front();
+      worklist.pop();
+
+      DATAFLOW_DEBUG(llvm::dbgs() << "Invoking '" << analysis->debugName
+                                  << "' on: " << point << "\n");
+      if (failed(analysis->visit(point)))
+        return failure();
+    }
+
+    // Iterate until all states are in some initialized state and the worklist
+    // is exhausted.
+  } while (!worklist.empty());
+
+  return success();
+}
+```
+
+The logic is stright forward for a top operation (opertations that has no information about user of it):
+
+1. Call `initialize` for each analysis
+2. If change of state invokes any of the analysis on any [`ProgramPoint`](#programpoint), push the pair into worklist
+3. Extract analysis from worklist and call `visit` on the [`ProgramPoint`](#programpoint)
+
+Data flow solver also provide the following methods:
+
+1. `StateT *DataFlowSolver::getOrCreateState(PointT point)`: get state from [point](#programpoint) and `TypeID::get<StateT>()` map. If no exist, create a new one into the map and return the created pointer.
+
+### General analsis framework
+
+#### Analysis
+
+Subclass of [`DataFlowAnalysis`](llvm-project/mlir/include/mlir/Analysis/DataFlow/setToEntryState.cpp#L9), the following methods need to be implemented:
+
+1. `initialize`: will be called by [Data flow solver](#data-flow-solver) to initialize the state of the analysis
+2. `visit`: will be called by [Data flow solver](#data-flow-solver) if worllist is not empty.
+
+#### State
+
+Subclass of [`AnalysisState`](llvm-project/mlir/include/mlir/Analysis/DataFlowFramework.h#L325), the following methods need to be implemented:
+
+1. `isUninitialized`: if the state is initialized or not
+2. `defaultInitialize`: default initialization, return `ChangeResult`
+3. `join`: join the state with `rhs` state, update the value of state, return `ChangeResult`
+
+The following methods may be intested:
+
+1. `AnalysisState::addDependency(ProgramPoint dependent, DataFlowAnalysis *analysis)`: push pair of `dependent` and `analysis` into `AnalysisState::dependents`
+
+#### Invoke analysis
+
+As illustrated in the [previous section](#data-flow-solver) all [point](#programpoint)'s [state](#state) will be first initilized, if ther is a need for further handling (say propagate), it should be be push a pair of [point](#programpoint) and [analysis](#analysis) into worklist. 
+
+Thus to invoke the analysis, user should:
+
+1. Add relative infomation into [state](#state) by calling `AnalysisState::addDependency(ProgramPoint dependent, DataFlowAnalysis *analysis)`:
+   This is saves [dependent](#programpoint) and [analysis](#analysis) pair, and will push the pair into worklist if the state is changed.
+2. Call `DataFlowAnalysis::propagateIfChanged(AnalysisState *state, ChangeResult changed)`, if `changed` is flaged, it will eventually call `AnalysisState::onUpdate(DataFlowSolver *solver)`:
+   It will push all [point](#programpoint) and [`analysis`](#analysis) pairs in `AnalysisState::dependents` into `DataFlowSolver::worklist`
+
+### SparseForwardDataFlowAnalysis
+
+This is an wrapper of [analysis framework](#analysis-framework), it will do the similar stuff and provide a more user-friendly interface.
+
+To understand it more, we use example of [AxisInfoAnalysis](triton-project/lib/Analysis/AxisInfo.cpp#L168) 
+
+The process of using `SparseForwardDataFlowAnalysis` is same with normal [analysis framework](#analysis-framework).
+
+Note that `SparseForwardDataFlowAnalysis`'s default`initialize` function will try to escape deadcode, thus `dataflow::DeadCodeAnalysis` should be added before analysis that using the default initialize procedure.
+
+#### Analysis
+
+Subclass of [`SparseForwardDataFlowAnalysis`](llvm-project/mlir/include/mlir/Analysis/DataFlow/SparseAnalysis.h#L268) it is eventully a subclass of [`DataFlowAnalysis`](llvm-project/mlir/include/mlir/Analysis/DataFlowFramework.h#L222)
+
+There are a few methods that user need to define:
+
+1. `visitOperation(Operation *op, ArrayRef<const StateT *> operands, ArrayRef<StateT *> results)`: will be called:
+   1. In initialize procedure of [data flow solver](#data-flow-solver)
+   2. `SparseForwardDataFlowAnalysis::visit`: which will be called by [data flow solver](#data-flow-solver) if worklist is not empty
+2. `setToEntryState`: set the state of the entry point of the analysis (guessing top operation)
+
+For our example, it further defined `visitNonControlFlowArguments`:
+
+1. Seems to handle those inputs that is not control flow related, will set them to entry state by calling `setToEntryState`
+2. The reason for this is to handle `scf::ForOp` where the first argument is the loop variable.
+
+Other functions we would be interested in are:
+
+1. `SparseForwardDataFlowAnalysis::getLatticeElement(Value value)`: 
+2. `AbstractSparseForwardDataFlowAnalysis::initialize(Operation *top)`: This will set all argument of the top operation (no source of input) to entry state, and call `initializeRecursively`
+3. `AbstractSparseForwardDataFlowAnalysis::initializeRecursively(Operation *op)`: recursively call `visitOperation` and `visitBlock` in a deep first search manner
+4. `AbstractSparseForwardDataFlowAnalysis::visitOperation(Operation *op)`
+   1. For all operand of the current operation, call [`useDefSubscribe`](#state-1) and the parameter is the current [analysis](#analysis-1)
+   2. Special handling for branch and call operations
+   3. Call user defined `visitOperation` function to create state for the operation
+5. `AbstractSparseForwardDataFlowAnalysis::visitBlock(Block *block)`: To be updated
+
+#### State
+
+It uses [`Lattice`](llvm-project/mlir/include/mlir/Analysis/DataFlow/SparseAnalysis.h#L85) as the wrapper of the [state](#state) and also the subclass of [`AnalysisState`](llvm-project/mlir/include/mlir/Analysis/DataFlowFramework.h#L325).
+
+The [User defined](#user-defined-structure) should be the template type `ValueT` of the `Lattice` class.
+
+The are few methods that we will be interested in:
+
+1. Construction function of `Lattice` only save [`ProgramPoint`](#programpoint) into it
+2. `Lattice::getPoint()`: get the [`ProgramPoint`](#programpoint) of the state and return as `Value`
+3. `Lattice::getValue()`: get the value of the state (e.g. `AxisInfo` instance)
+4. `AbstractSparseLattice::useDefSubscribe(DataFlowAnalysis *analysis)`: push [`analysis`](#analysis) into `AbstractSparseLattice::useDefSubscribers` element
+5. `Lattice::join(const AbstractSparseLattice &rhs)`: join the state with `rhs` state, will call `join` of the [User defined](#user-defined-structure). return changed or not.
+
+##### User defined structure
+
+The user defined structure should be a class and include the following method:
+
+1. `join`: join the state with `rhs` state, return the joined state.
+2. `operator==`: used to compare if the two state are equal (changed or not)
+3. `getPessimisticValueState`: used to ge the most conservative value of the state
+
+#### Invoke analysis
+
+Similar to the [previous section](#invoke-analysis), to invoke (propagate) any analysis, user should:
+
+1. Add relative infomation into [state](#state-1) by using any of the following two functions:
+   1. `AnalysisState::addDependency(ProgramPoint dependent, DataFlowAnalysis *analysis)`: 
+   This is saves [dependent](#programpoint) and [analysis](#analysis-1) pair, and will push the pair into worklist if the state is changed
+   2. `AbstractSparseLattice::useDefSubscribe(DataFlowAnalysis *analysis)`:
+   This require the [program point](#programpoint) corresponding to a `mlir::Value` type and only save [analysis](#analysis-1). It will push pair of all user of `mlir::Value` and saved [analysis](#analysis-1) into worklist if the state is changed
+2. Call `DataFlowAnalysis::propagateIfChanged(AnalysisState *state, ChangeResult changed)`, if `changed` is flaged, it will eventually call `AbstractSparseLattice::onUpdate(DataFlowSolver *solver)`, which will do:
+   1. Push all [point](#programpoint) and [`analysis`](#analysis-1) pairs in `AnalysisState::dependents` into `DataFlowSolver::worklist` (actually will call `AnalysisState::onUpdate(DataFlowSolver *solver)` first)
+   2. make pair of current [point](#programpoint)'s operand and all [`analysis`](#analysis-1) in `AbstractSparseLattice::useDefSubscribers`, push them into [Data Flow solver](#data-flow-solver)'s worklist
 
 # Appendix
 

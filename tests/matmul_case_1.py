@@ -17,9 +17,8 @@ def matmul_kernel_m16n16k16(
     a = tl.load(a_ptrs)
     b = tl.load(b_ptrs)
     
-    accumulator = tl.zeros((16, 16), dtype=tl.float32)
-    accumulator = tl.dot(a, b, accumulator)
-    c = accumulator.to(tl.float16)
+    c = tl.dot(a, b)
+    c = c.to(tl.float16)
 
     c_ptrs = c_ptr + offsets
     tl.store(c_ptrs, c)

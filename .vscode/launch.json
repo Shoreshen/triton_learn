@@ -144,6 +144,23 @@
             "args": "1>${workspaceFolder}/triton_compile_test.ll 2>&1"
         },
         {
+            "name": "Python: add_case_1.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/tests/add_case_1.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "preLaunchTask": "Clear Cache",
+            "env": {
+                "MLIR_ENABLE_DUMP": "1",
+                "LLVM_IR_ENABLE_DUMP": "1",
+                // "TRITON_ENABLE_LLVM_DEBUG": "1",
+                "TRITON_CACHE_DIR": "${workspaceFolder}/.cache",
+                "TMPDIR": "${workspaceFolder}/.tmp"
+            },
+            "args": "1>${workspaceFolder}/add_case_1.ll 2>&1"
+        },
+        {
             "name": "(gdb) Attach",
             "type": "cppdbg",
             "request": "attach",
