@@ -17,7 +17,8 @@
                 // "LLVM_IR_ENABLE_DUMP": "1",
                 // "TRITON_ENABLE_LLVM_DEBUG": "1",
                 "TRITON_CACHE_DIR": "${workspaceFolder}/.cache",
-                "TMPDIR": "${workspaceFolder}/.tmp"
+                "TMPDIR": "${workspaceFolder}/.tmp",
+                "TORCH_COMPILE_DEBUG": "1"
             },
         },
         {
@@ -141,7 +142,7 @@
                 "TRITON_CACHE_DIR": "${workspaceFolder}/.cache",
                 "TMPDIR": "${workspaceFolder}/.tmp"
             },
-            "args": "1>${workspaceFolder}/triton_compile_test.ll 2>&1"
+            // "args": "1>${workspaceFolder}/triton_compile_test.ll 2>&1"
         },
         {
             "name": "Python: add_case_1.py",
@@ -158,13 +159,13 @@
                 "TRITON_CACHE_DIR": "${workspaceFolder}/.cache",
                 "TMPDIR": "${workspaceFolder}/.tmp"
             },
-            "args": "1>${workspaceFolder}/add_case_1.ll 2>&1"
+            // "args": "1>${workspaceFolder}/add_case_1.ll 2>&1"
         },
         {
-            "name": "Python: RoPE.py",
+            "name": "Python: rotate_half.py",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/tests/RoPE.py",
+            "program": "${workspaceFolder}/tests/rotate_half.py",
             "console": "integratedTerminal",
             "justMyCode": false,
             "preLaunchTask": "Clear Cache",
@@ -175,7 +176,25 @@
                 "TRITON_CACHE_DIR": "${workspaceFolder}/.cache",
                 "TMPDIR": "${workspaceFolder}/.tmp"
             },
-            // "args": "1>${workspaceFolder}/RoPE.ll 2>&1"
+            // "args": "1>${workspaceFolder}/rotate_half.ll 2>&1"
+        },
+        {
+            "name": "Python: rope_torch_case.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/tests/rope_torch_case.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "preLaunchTask": "Clear Cache",
+            "env": {
+                // "MLIR_ENABLE_DUMP": "1",
+                // "LLVM_IR_ENABLE_DUMP": "1",
+                // "TRITON_ENABLE_LLVM_DEBUG": "1",
+                "TRITON_CACHE_DIR": "${workspaceFolder}/.cache",
+                "TMPDIR": "${workspaceFolder}/.tmp",
+                "TORCH_COMPILE_DEBUG": "1"
+            },
+            // "args": "1>${workspaceFolder}/rope_torch_case.ll 2>&1"
         },
         {
             "name": "(gdb) Attach",
