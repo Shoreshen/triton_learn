@@ -1143,7 +1143,7 @@ The desired layout is a type of [block layout](#block), the calculation logic is
       4. Bit length of element as $b$
       5. Total number of elements in the tensor as $N$
       6. Total number of threads in a CTA as $T$
-   2. Thus the calculated `perThread` is as $\min(\max(D\dim(b\div8),1),C,S,N\div T)$
+   2. Thus the calculated `perThread` is as $\min(\max(D\div(b\div8),1),C,S,N\div T)$
 5. Find all load/store related operations that:
    1. has a data dependency connect (meaning connected in a data dependency graph)
    2. has the same shape and order

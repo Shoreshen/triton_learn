@@ -43,6 +43,13 @@
             "cppAttachName": "(gdb) Attach",
         },
         {
+            "name": "Python & cpp: add_case_1",
+            "type": "pythoncpp",
+            "request": "launch",
+            "pythonLaunchName": "Python: add_case_1.py",
+            "cppAttachName": "(gdb) Attach",
+        },
+        {
             "name": "Python: matmul_case_1.py",
             "type": "debugpy",
             "request": "launch",
@@ -153,8 +160,8 @@
             "justMyCode": false,
             "preLaunchTask": "Clear Cache",
             "env": {
-                "MLIR_ENABLE_DUMP": "1",
-                "LLVM_IR_ENABLE_DUMP": "1",
+                // "MLIR_ENABLE_DUMP": "1",
+                // "LLVM_IR_ENABLE_DUMP": "1",
                 // "TRITON_ENABLE_LLVM_DEBUG": "1",
                 "TRITON_CACHE_DIR": "${workspaceFolder}/.cache",
                 "TMPDIR": "${workspaceFolder}/.tmp"

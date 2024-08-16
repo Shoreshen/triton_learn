@@ -94,6 +94,13 @@
         "any": "cpp",
         "source_location": "cpp",
         "typeindex": "cpp",
-        "expected": "cpp"
+        "expected": "cpp",
+        "cfenv": "cpp",
+        "codecvt": "cpp",
+        "future": "cpp",
+        "latch": "cpp",
+        "scoped_allocator": "cpp",
+        "coroutine": "cpp",
+        "stdfloat": "cpp"
     }
 }
