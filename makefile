@@ -43,8 +43,8 @@ allow_attach:
 
 PHONY += active_venv deactive_venv clear_cache
 # git ====================================================================================
-sub_pull:
-	git submodule update --remote triton-project
+triton_pull:
+	cd triton-project && git pull
 commit:
 	git add -A
 	@echo "Please type in commit comment: "; \

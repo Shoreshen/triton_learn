@@ -1143,7 +1143,7 @@ The desired layout is a type of [block layout](#block), the calculation logic is
       4. Bit length of element as $b$
       5. Total number of elements in the tensor as $N$
       6. Total number of threads in a CTA as $T$
-   2. Thus the calculated `perThread` is as $\min(\max(D\div(b\div8),1),C,S,N\div T)$
+   2. Thus the calculated `perThread` is as $\min(\max(D\div(b\div8),1),C,S,N\div T, 128\div (b\div 8))$
 5. Find all load/store related operations that:
    1. has a data dependency connect (meaning connected in a data dependency graph)
    2. has the same shape and order
@@ -1151,6 +1151,29 @@ The desired layout is a type of [block layout](#block), the calculation logic is
 6. Create the desired [block layout](#block) with the same `numWarps`, `threadsPerWarp`, `CTALayout`, but using the new `order` and calculated `perThread` for `sizePerThread[order[0]]`
 
 This basically means each thread should own more continues element.
+
+##### Why it is desired
+
+Basic understanding for memory visiting model for Nvidia:
+
+1. One Stream Multiprocessor (SM) has several warps, each warp contain 32 threads
+2. Only SM has memory controller, it can load/store $512$ byte data once a time
+3. Instruction within warp will be executed at same time, which means load/store instruction will issued 32 times at same time
+4. If the target addresses of load/store instruction make it impossible to load/store within one time (too big or discontinuous or e.g.), the SM will issue multiple load/store instructions to load/store the data
+
+Thus we hope that for each warp, load/store instruciton could fully utilize the capacity of memory controller of SM. That is, the load/store instruction for a warp should operate continuous $512$ byte data.
+
+We assume for a tensor $A$ with dimention $[d_1,d_2,...,d_n]$, the address of $A[p_1,p_2,...,p_n]$ 
+
+is calculated as $offset = \sum_{i=1}^nf(i)p_i * \text{byte\_per\_element}$ while function $f(i)=\begin{cases}\prod_{j=i+1}^nd_i&i+1\leq n\\1&else\end{cases}$
+
+The function of calculating `perThread` is $\min(\max(D\div(b\div8),1),C,S,N\div T, 128\div (b\div 8))$
+
+1. divisibility for all input is 16: 
+   1. Almost all load/store operation use a base address plus offset addresses to calculate the element addresses $elem_i = base + offset_i$ 
+   2. With conservitive estimation the divisibility for element address is also 16, this limite the upper bond of $128\div b$
+   3. Thus for one thread the maximum data it occupy is $128$ bit $16$ byte, the total bytes per warp is $16*32 = 512$ byte
+2. 
 
 #### AxisInfo
 
