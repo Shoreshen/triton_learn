@@ -101,6 +101,14 @@
         "latch": "cpp",
         "scoped_allocator": "cpp",
         "coroutine": "cpp",
-        "stdfloat": "cpp"
+        "stdfloat": "cpp",
+        "barrier": "cpp",
+        "csetjmp": "cpp",
+        "cuchar": "cpp",
+        "propagate_const": "cpp",
+        "print": "cpp",
+        "strstream": "cpp",
+        "syncstream": "cpp",
+        "*.ipp": "cpp"
     }
 }

@@ -2,6 +2,7 @@
 # $^  表示所有的依赖文件
 # $<  表示第一个依赖文件
 # $?  表示比目标还要新的依赖文件列表
+SHELL := /usr/bin/bash
 BRANCH = $(shell git symbolic-ref --short HEAD)
 LLVM_HASH = $(shell cat ./triton-project/cmake/llvm-hash.txt)
 PW = $(shell cat ~/文档/PW)
@@ -23,7 +24,7 @@ clear_loc:
 PHONY += checkout_hash config_llvm build_llvm
 # Triton Build ===========================================================================
 build_triton:
-	cd triton/build && LLVM_INCLUDE_DIRS=../llvm-project/build/include LLVM_LIBRARY_DIR=../llvm-project/build/lib LLVM_SYSPATH=../llvm-project/build DEBUG=1 MAX_JOBS=6 pip install -e python
+	source .venv/bin/activate && cd triton-project && LLVM_INCLUDE_DIRS=../llvm-project/build/include LLVM_LIBRARY_DIR=../llvm-project/build/lib LLVM_SYSPATH=../llvm-project/build DEBUG=1 MAX_JOBS=6 pip install -e python
 
 PHONY += config_triton build_triton
 # python virtualenv ======================================================================
