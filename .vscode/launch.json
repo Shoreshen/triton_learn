@@ -57,6 +57,30 @@
             "cppAttachName": "(gdb) Attach",
         },
         {
+            "name": "Python & cpp: test_case.py",
+            "type": "pythoncpp",
+            "request": "launch",
+            "pythonLaunchName": "Python: test_case.py",
+            "cppAttachName": "(gdb) Attach",
+        },
+        {
+            "name": "Python: test_case.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/tests/test_case.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "preLaunchTask": "Clear Cache",
+            "env": {
+                // "MLIR_ENABLE_DUMP": "1",
+                // "LLVM_IR_ENABLE_DUMP": "1",
+                // "TRITON_ENABLE_LLVM_DEBUG": "1",
+                "TRITON_CACHE_DIR": "${workspaceFolder}/.cache",
+                "TMPDIR": "${workspaceFolder}/.tmp"
+            },
+            // "args": "1>${workspaceFolder}/test_case.ll 2>&1"
+        },
+        {
             "name": "Python: matmul_case_1.py",
             "type": "debugpy",
             "request": "launch",
@@ -142,23 +166,6 @@
             // "args": "1>${workspaceFolder}/03-matrix-multiplication.ll 2>&1"
         },
         {
-            "name": "Python: triton_compile_test.py",
-            "type": "debugpy",
-            "request": "launch",
-            "program": "${workspaceFolder}/tests/triton_compile_test.py",
-            "console": "integratedTerminal",
-            "justMyCode": false,
-            "preLaunchTask": "Clear Cache",
-            "env": {
-                // "MLIR_ENABLE_DUMP": "1",
-                // "LLVM_IR_ENABLE_DUMP": "1",
-                // "TRITON_ENABLE_LLVM_DEBUG": "1",
-                "TRITON_CACHE_DIR": "${workspaceFolder}/.cache",
-                "TMPDIR": "${workspaceFolder}/.tmp"
-            },
-            // "args": "1>${workspaceFolder}/triton_compile_test.ll 2>&1"
-        },
-        {
             "name": "Python: add_case_1.py",
             "type": "debugpy",
             "request": "launch",
@@ -224,7 +231,8 @@
                 // "TRITON_ENABLE_LLVM_DEBUG": "1",
                 "TRITON_CACHE_DIR": "${workspaceFolder}/.cache",
                 "TMPDIR": "${workspaceFolder}/.tmp",
-                "TORCH_COMPILE_DEBUG": "1"
+                "TORCH_COMPILE_DEBUG": "1",
+                "TORCHINDUCTOR_CACHE_DIR": "${workspaceFolder}/.tmp"
             },
             // "args": "1>${workspaceFolder}/triton_compile_test.ll 2>&1"
         },
