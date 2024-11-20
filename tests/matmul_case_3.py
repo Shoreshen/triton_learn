@@ -15,7 +15,7 @@ def matmul_kernel_mnk(
     N: tl.constexpr, 
     K: tl.constexpr
 ):
-    offsets_a = tl.arange(0, M)[:, None] * K + tl.arange(0, K)[None, :]
+    offsets = tl.arange(0, M)[:, None] * K + tl.arange(0, K)[None, :]
     offsets_b = tl.arange(0, K)[:, None] * N + tl.arange(0, N)[None, :]
     offsets_c = tl.arange(0, M)[:, None] * N + tl.arange(0, N)[None, :]
 

@@ -24,7 +24,7 @@ clear_loc:
 PHONY += checkout_hash config_llvm build_llvm
 # Triton Build ===========================================================================
 build_triton:
-	source .venv/bin/activate && cd triton-project && LLVM_INCLUDE_DIRS=../llvm-project/build/include LLVM_LIBRARY_DIR=../llvm-project/build/lib LLVM_SYSPATH=../llvm-project/build DEBUG=1 MAX_JOBS=6 pip install -e python
+	source .venv/bin/activate && cd triton-project && LLVM_INCLUDE_DIRS=../llvm-project/build/include LLVM_LIBRARY_DIR=../llvm-project/build/lib LLVM_SYSPATH=../llvm-project/build DEBUG=1 MAX_JOBS=6 pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -e python
 
 PHONY += config_triton build_triton
 # python virtualenv ======================================================================
